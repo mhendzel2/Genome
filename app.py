@@ -28,6 +28,20 @@ if 'session_id' not in st.session_state:
     import uuid
     st.session_state.session_id = str(uuid.uuid4())
 
+@st.cache_resource
+def get_db_manager():
+    """Initialize database manager with caching to prevent repeated initialization"""
+    try:
+        db_manager = DatabaseManager()
+        # Populate only if the database is truly empty
+        if db_manager.get_database_stats()['total_datasets'] == 0:
+            count = db_manager.populate_sample_datasets()
+            st.toast(f"Database initialized with {count} sample datasets.")
+        return db_manager
+    except Exception as e:
+        st.error(f"Database connection failed: {e}")
+        return None
+
 def main():
     st.set_page_config(
         page_title="Genomics Data Analysis Platform",
@@ -45,16 +59,10 @@ def main():
     dataset_discovery = DatasetDiscovery()
     analyzer = GenomicsAnalyzer(r_integration)
     
-    # Initialize database
-    try:
-        db_manager = DatabaseManager()
-        # Populate sample data if database is empty
-        sample_count = db_manager.populate_sample_datasets()
-        if sample_count > 0:
-            st.success(f"Database initialized with {sample_count} sample datasets")
-    except Exception as e:
-        st.error(f"Database connection failed: {e}")
-        db_manager = None
+    # Initialize database with caching
+    db_manager = get_db_manager()
+    if not db_manager:
+        st.stop()  # Stop execution if DB is not available
     
     # Sidebar navigation
     page = st.sidebar.selectbox(
@@ -568,22 +576,40 @@ def export_results_page():
                 )
             
             elif selected_format in ["CSV", "TSV"]:
-                # Convert to DataFrame if possible
-                combined_df = pd.DataFrame()
+                export_files = {}
+                
                 for result_key, result_data in export_data.items():
                     if isinstance(result_data, dict):
-                        df = pd.DataFrame([result_data])
-                        df['analysis_type'] = result_key
-                        combined_df = pd.concat([combined_df, df], ignore_index=True)
+                        if 'peaks' in str(result_data) and isinstance(result_data, list):
+                            df = pd.DataFrame(result_data)
+                            export_files[f"{result_key}_peaks"] = df
+                        elif any(key in result_data for key in ['upregulated', 'downregulated', 'total_genes']):
+                            # Differential expression results
+                            df = pd.DataFrame([result_data])
+                            export_files[f"{result_key}_summary"] = df
+                        elif any(key in result_data for key in ['common_features', 'unique_tissue1']):
+                            # Tissue comparison results
+                            df = pd.DataFrame([result_data])
+                            export_files[f"{result_key}_comparison"] = df
+                        else:
+                            df = pd.DataFrame([result_data])
+                            export_files[f"{result_key}"] = df
                 
-                separator = ',' if selected_format == "CSV" else '\t'
-                csv_string = combined_df.to_csv(sep=separator, index=False)
+                import zipfile
+                import io
+                
+                zip_buffer = io.BytesIO()
+                with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zip_file:
+                    for file_key, df in export_files.items():
+                        separator = ',' if selected_format == "CSV" else '\t'
+                        csv_string = df.to_csv(sep=separator, index=False)
+                        zip_file.writestr(f"{file_key}.{selected_format.lower()}", csv_string)
                 
                 st.download_button(
-                    label=f"Download {selected_format}",
-                    data=csv_string,
-                    file_name=f"genomics_analysis_results.{selected_format.lower()}",
-                    mime="text/csv" if selected_format == "CSV" else "text/tab-separated-values"
+                    label=f"Download {selected_format} Archive",
+                    data=zip_buffer.getvalue(),
+                    file_name=f"genomics_analysis_results.zip",
+                    mime="application/zip"
                 )
             
             st.success("Export file generated successfully!")
