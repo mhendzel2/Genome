@@ -66,31 +66,36 @@ class RIntegration:
             print(f"Warning: Could not install R packages: {e}")
     
     def _execute_r_script(self, script: str, data_files: Optional[Dict[str, str]] = None) -> str:
-        """Execute R script and return output"""
+        """Execute R script safely with input validation"""
         if not self.r_available:
             raise RuntimeError("R is not available on this system")
         
+        if not self._validate_r_script(script):
+            raise ValueError("R script contains potentially unsafe content")
+        
         with tempfile.TemporaryDirectory() as temp_dir:
-            # Write R script to temporary file
+            # Write R script to temporary file with safe filename
             script_path = os.path.join(temp_dir, 'analysis.R')
             with open(script_path, 'w') as f:
                 f.write(script)
             
-            # Write data files if provided
+            # Write data files if provided with validation
             if data_files:
                 for filename, content in data_files.items():
-                    file_path = os.path.join(temp_dir, filename)
+                    safe_filename = self._sanitize_filename(filename)
+                    file_path = os.path.join(temp_dir, safe_filename)
                     with open(file_path, 'w') as f:
                         f.write(content)
             
-            # Execute R script
+            # Execute R script with restricted environment
             try:
                 result = subprocess.run(
                     ['R', '--vanilla', '--slave', '-f', script_path],
                     cwd=temp_dir,
                     capture_output=True,
                     text=True,
-                    timeout=300  # 5 minute timeout
+                    timeout=300,  # 5 minute timeout
+                    env={'PATH': os.environ.get('PATH', ''), 'HOME': temp_dir}  # Restricted environment
                 )
                 
                 if result.returncode != 0:
@@ -100,6 +105,28 @@ class RIntegration:
                 
             except subprocess.TimeoutExpired:
                 raise RuntimeError("R script execution timed out")
+    
+    def _validate_r_script(self, script: str) -> bool:
+        """Validate R script for security issues"""
+        dangerous_patterns = [
+            'system(', 'shell(', 'Sys.setenv(', 'setwd(',
+            'file.remove(', 'unlink(', 'file.create(',
+            'source(', 'eval(', 'parse('
+        ]
+        
+        script_lower = script.lower()
+        for pattern in dangerous_patterns:
+            if pattern.lower() in script_lower:
+                return False
+        
+        return True
+    
+    def _sanitize_filename(self, filename: str) -> str:
+        """Sanitize filename to prevent path traversal attacks"""
+        import re
+        safe_name = re.sub(r'[^\w\-_\.]', '_', filename)
+        safe_name = re.sub(r'^[\.\-]+', '', safe_name)
+        return safe_name[:100] if safe_name else 'data_file.txt'
     
     def basic_statistics(self, data_files: Dict[str, Any]) -> Dict[str, Any]:
         """Compute basic statistics using R"""

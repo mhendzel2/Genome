@@ -4,7 +4,7 @@ import numpy as np
 from io import StringIO, BytesIO
 import gzip
 import os
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, List
 import re
 
 class DataValidator:
@@ -60,7 +60,7 @@ class DataValidator:
         else:
             return filename.split('.')[-1] if '.' in filename else ''
     
-    def _read_file_content(self, uploaded_file) -> str:
+    def _read_file_content(self, uploaded_file, max_lines_for_validation=1000) -> str:
         """Read file content, handling compression"""
         # Reset file pointer
         uploaded_file.seek(0)
@@ -266,3 +266,84 @@ class DataValidator:
             return df
         
         return pd.DataFrame()
+    
+    def load_as_dataframe_chunked(self, uploaded_file, data_type: str, chunk_size: int = 10000) -> pd.DataFrame:
+        """Load large files as pandas DataFrame with chunked processing"""
+        # Reset file pointer
+        uploaded_file.seek(0)
+        
+        # Determine delimiter
+        extension = self._get_file_extension(uploaded_file.name.lower())
+        if extension == 'csv':
+            delimiter = ','
+        else:
+            delimiter = '\t'
+        
+        # Generate column names based on format
+        col_names = self._get_column_names(extension)
+        
+        chunks = []
+        try:
+            if uploaded_file.name.lower().endswith('.gz'):
+                import gzip
+                with gzip.open(uploaded_file, 'rt') as f:
+                    chunk_data = []
+                    for line_num, line in enumerate(f):
+                        if line.startswith('#'):
+                            continue
+                        
+                        chunk_data.append(line.strip().split(delimiter))
+                        
+                        if len(chunk_data) >= chunk_size:
+                            df_chunk = pd.DataFrame(chunk_data, columns=col_names[:len(chunk_data[0])])
+                            chunks.append(df_chunk)
+                            chunk_data = []
+                    
+                    if chunk_data:
+                        df_chunk = pd.DataFrame(chunk_data, columns=col_names[:len(chunk_data[0])])
+                        chunks.append(df_chunk)
+            else:
+                chunk_data = []
+                for line in uploaded_file:
+                    line_str = line.decode('utf-8').strip()
+                    if line_str.startswith('#'):
+                        continue
+                    
+                    chunk_data.append(line_str.split(delimiter))
+                    
+                    if len(chunk_data) >= chunk_size:
+                        df_chunk = pd.DataFrame(chunk_data, columns=col_names[:len(chunk_data[0])])
+                        chunks.append(df_chunk)
+                        chunk_data = []
+                
+                if chunk_data:
+                    df_chunk = pd.DataFrame(chunk_data, columns=col_names[:len(chunk_data[0])])
+                    chunks.append(df_chunk)
+            
+            if chunks:
+                df = pd.concat(chunks, ignore_index=True)
+                
+                # Convert numeric columns
+                for col in ['start', 'end', 'score']:
+                    if col in df.columns:
+                        try:
+                            df[col] = pd.to_numeric(df[col], errors='coerce')
+                        except:
+                            pass
+                
+                return df
+            
+        except Exception as e:
+            print(f"Error in chunked loading: {e}")
+            return self.load_as_dataframe(uploaded_file, data_type)
+        
+        return pd.DataFrame()
+    
+    def _get_column_names(self, extension: str) -> List[str]:
+        """Get appropriate column names based on file extension"""
+        if extension in ['bed', 'bedgraph']:
+            return ['chr', 'start', 'end', 'name', 'score', 'strand'] + [f'col_{i}' for i in range(7, 20)]
+        elif extension in ['narrowpeak', 'broadpeak']:
+            return ['chr', 'start', 'end', 'name', 'score', 'strand', 'signalValue', 'pValue', 'qValue', 'peak'] + [f'col_{i}' for i in range(11, 20)]
+        else:
+            return [f'col_{i}' for i in range(1, 20)]
