@@ -1,25 +1,7 @@
-# Core dependencies
-numpy>=2.3.0
-pandas>=2.3.0
-plotly>=6.1.2
-psycopg2-binary>=2.9.10
-sqlalchemy>=2.0.41
-streamlit>=1.45.1
-
-# Scientific computing
-scikit-learn>=1.7.0
-scipy>=1.11.0
-
-# Advanced genomics libraries
-pybedtools>=0.9.0
-pysam>=0.21.0
-pyvcf3>=1.0.3
-gseapy>=1.0.4
-cooltools>=0.5.4
-bioframe>=0.4.1
-genomepy>=0.15.0
-
-# Additional utilities
-requests>=2.31.0
-matplotlib>=3.7.0
-seaborn>=0.12.0
+streamlit
+requests
+pandas
+gseapy
+cooltools
+scipy
+plotly
