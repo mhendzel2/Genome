@@ -78,6 +78,34 @@ class GenomicsAnalyzer:
             if 'tmp_path' in locals() and os.path.exists(tmp_path):
                 os.remove(tmp_path)
 
+    def comparative_analysis(self, gene_expression_file, proteomics_file) -> dict:
+        """Compares gene expression and proteomics data."""
+        try:
+            expr_df = self.validator.load_as_dataframe(gene_expression_file, 'Gene Expression')
+            prot_df = self.validator.load_as_dataframe(proteomics_file, 'Proteomics')
+
+            # This is a very simplified comparison, assuming the first column in each
+            # file is a common gene/protein identifier.
+            merged_df = pd.merge(expr_df, prot_df, on=0, suffixes=('_expr', '_prot'))
+
+            if merged_df.empty:
+                return {'error': 'No common identifiers found between the datasets.'}
+
+            # Correlate the second column of each file
+            if merged_df.shape[1] >= 3:
+                corr, p_value = pearsonr(merged_df.iloc[:, 1], merged_df.iloc[:, 2])
+                return {
+                    'analysis_type': 'Gene Expression vs. Proteomics',
+                    'correlation_coefficient': corr,
+                    'p_value': p_value,
+                    'common_features': len(merged_df),
+                    'dataframe': merged_df
+                }
+            else:
+                return {'error': 'Insufficient data for correlation.'}
+        except Exception as e:
+            return {'error': f"Comparative analysis failed: {e}"}
+
     def multi_omics_integration(self, uploaded_files: dict) -> dict:
         """A basic multi-omics integration using Pearson correlation."""
         try:

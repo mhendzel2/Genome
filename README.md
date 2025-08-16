@@ -1,19 +1,20 @@
 # Genomics Data Analysis Platform (New Design)
 
-This is a Streamlit-based web application for genomics data analysis, redesigned from the ground up for stability and maintainability. It provides tools for searching public genomics databases, performing basic analysis, and visualizing the results.
+This is a Streamlit-based web application for genomics and proteomics data analysis, redesigned from the ground up for stability and maintainability. It provides tools for searching public databases, performing basic analysis, and visualizing the results.
 
 ## Features
 
-- **Dataset Discovery**: Search and browse public genomics databases (ENCODE).
-- **Data Download**: Download datasets directly from the ENCODE database.
+- **Dataset Discovery**: Search and browse public databases (ENCODE, GEO, PRIDE).
+- **Data Download**: Download datasets directly from the public databases.
 - **Analysis Tools**:
   - Basic statistics calculation.
   - Gene set enrichment analysis.
   - Chromatin interaction analysis (insulation score).
-  - Basic multi-omics integration (correlation).
+  - Comparative analysis of gene expression and proteomics data.
 - **Interactive Visualizations**:
-  - Volcano plots.
+  - Bar charts for enrichment results.
   - Heatmaps.
+  - Correlation scatter plots.
 
 ## Setup and Installation
 
@@ -43,7 +44,7 @@ This is a Streamlit-based web application for genomics data analysis, redesigned
 
 ## Usage
 
--   **Dataset Discovery**: Use the search bar on the "Dataset Discovery" page to find datasets from ENCODE.
+-   **Dataset Discovery**: Use the search bar on the "Dataset Discovery" page to find datasets from ENCODE, GEO, and PRIDE.
 -   **Data Download**: Click the "Download" button on a search result to download the dataset.
--   **Analysis**: Go to the "Analysis" page, upload a file, and select an analysis to run.
+-   **Analysis**: Go to the "Analysis" page, upload file(s), and select an analysis to run.
 -   **Visualization**: After running an analysis, go to the "Visualization" page to create plots from the results.

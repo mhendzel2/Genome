@@ -1,97 +1,32 @@
-import requests
-from typing import Dict, List, Any, Optional
-import os
+from typing import Dict, List, Any
+from .encode_client import ENCODEClient
+from .geo_client import GEOClient
+from .pride_client import PRIDEClient
 
 class DatasetDiscovery:
-    """A class to discover datasets from public genomics databases."""
+    """A manager for different database clients."""
 
     def __init__(self):
-        self.base_url = "https://www.encodeproject.org"
-
-    def search_datasets(self,
-                       search_term: str = "",
-                       data_types: Optional[List[str]] = None,
-                       tissues: Optional[List[str]] = None,
-                       organism: str = "Human") -> List[Dict[str, Any]]:
-        """Search for datasets on the ENCODE platform."""
-        
-        search_params = {
-            "type": "Experiment",
-            "status": "released",
-            "limit": "all",
-            "frame": "object"
+        self.clients = {
+            "ENCODE": ENCODEClient(),
+            "GEO": GEOClient(),
+            "PRIDE": PRIDEClient(),
         }
 
-        if search_term:
-            search_params["searchTerm"] = search_term
-        
-        if organism:
-            search_params["replicates.library.biosample.donor.organism.scientific_name"] = organism
+    def search(self, databases: List[str], search_term: str, **kwargs) -> List[Dict[str, Any]]:
+        """Search across multiple databases."""
+        all_results = []
+        for db_name in databases:
+            if db_name in self.clients:
+                client = self.clients[db_name]
+                results = client.search(search_term, **kwargs)
+                all_results.extend(results)
+        return all_results
 
-        if data_types:
-            search_params["assay_title"] = data_types
-
-        if tissues:
-            search_params["biosample_ontology.term_name"] = tissues
-
-        try:
-            response = requests.get(f"{self.base_url}/search/", params=search_params, headers={'accept': 'application/json'})
-            response.raise_for_status()
-            search_results = response.json()
-            return self._format_results(search_results.get("@graph", []))
-        except requests.exceptions.RequestException as e:
-            print(f"Error querying ENCODE API: {e}")
-            return []
-
-    def _format_results(self, results: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        """Format ENCODE results into the application's data structure."""
-        formatted_results = []
-        for result in results:
-            biosample = result.get('biosample_summary', '')
-            
-            formatted_results.append({
-                'id': result.get('accession'),
-                'title': result.get('description', 'No title available'),
-                'description': result.get('summary', 'No description available'),
-                'data_type': result.get('assay_title', 'N/A'),
-                'tissue': biosample,
-                'organism': result.get('replicates', [{}])[0].get('library', {}).get('biosample', {}).get('organism', {}).get('scientific_name', 'N/A'),
-                'database': 'ENCODE',
-                'accession': result.get('accession'),
-            })
-        return formatted_results
-
-    def get_dataset_details(self, dataset_id: str) -> Optional[Dict[str, Any]]:
-        """Get detailed information about a specific dataset from ENCODE."""
-        try:
-            response = requests.get(f"{self.base_url}/experiments/{dataset_id}/?frame=embedded", headers={'accept': 'application/json'})
-            response.raise_for_status()
-            return response.json()
-        except requests.exceptions.RequestException as e:
-            print(f"Error fetching dataset details from ENCODE: {e}")
-            return None
-
-    def download_dataset(self, dataset_id: str) -> str:
-        """Download all files for a given dataset from ENCODE."""
-        dataset_details = self.get_dataset_details(dataset_id)
-        if not dataset_details:
-            raise Exception("Could not retrieve dataset details.")
-
-        download_dir = os.path.join("downloads", dataset_id)
-        os.makedirs(download_dir, exist_ok=True)
-
-        for file_info in dataset_details.get('files', []):
-            file_url = self.base_url + file_info.get('href')
-            local_filename = os.path.join(download_dir, file_info['accession'] + '_' + file_info.get('title', ''))
-
-            try:
-                with requests.get(file_url, stream=True) as r:
-                    r.raise_for_status()
-                    with open(local_filename, 'wb') as f:
-                        for chunk in r.iter_content(chunk_size=8192):
-                            f.write(chunk)
-            except requests.exceptions.RequestException as e:
-                print(f"Error downloading {file_url}: {e}")
-                continue
-        
-        return download_dir
+    def download(self, database: str, dataset_id: str) -> str:
+        """Download a dataset from a specific database."""
+        if database in self.clients:
+            client = self.clients[database]
+            return client.download(dataset_id)
+        else:
+            raise ValueError(f"Database '{database}' not supported.")
