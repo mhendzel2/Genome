@@ -22,3 +22,9 @@ class GenomicsVisualizer:
         """Creates a heatmap."""
         fig = px.imshow(df.corr(), title="Heatmap of Correlation")
         return fig
+
+    def create_correlation_scatter_plot(self, df: pd.DataFrame, x_col: str, y_col: str) -> go.Figure:
+        """Creates a scatter plot to show correlation."""
+        fig = px.scatter(df, x=x_col, y=y_col, trendline="ols",
+                         title=f"Correlation between {x_col} and {y_col}")
+        return fig

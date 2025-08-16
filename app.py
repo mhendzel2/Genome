@@ -1,5 +1,6 @@
 import streamlit as st
 from utils.dataset_discovery import DatasetDiscovery
+from utils.encode_client import ENCODEClient
 from utils.visualization import GenomicsVisualizer
 from analysis.analyzer import GenomicsAnalyzer
 import pandas as pd
@@ -14,24 +15,31 @@ logging.basicConfig(level=logging.INFO,
 def dataset_discovery_page(dataset_discovery):
     st.header("🔍 Dataset Discovery")
     try:
-        search_term = st.text_input("Search ENCODE", placeholder="e.g., H3K4me3, GSE12345")
+        db_options = list(dataset_discovery.clients.keys())
+        selected_dbs = st.multiselect("Select databases to search", db_options, default=db_options)
+
+        search_term = st.text_input("Search", placeholder="e.g., H3K4me3, cancer")
 
         if st.button("Search"):
+            if not selected_dbs:
+                st.warning("Please select at least one database to search.")
+                return
+
             with st.spinner("Searching..."):
-                results = dataset_discovery.search_datasets(search_term=search_term)
+                results = dataset_discovery.search(databases=selected_dbs, search_term=search_term)
                 if results:
-                    st.success(f"Found {len(results)} datasets.")
+                    st.success(f"Found {len(results)} datasets across {len(selected_dbs)} database(s).")
                     st.session_state['search_results'] = results
                     for result in results:
-                        with st.expander(f"{result['accession']}: {result['title']}"):
+                        with st.expander(f"[{result['database']}] {result['accession']}: {result['title']}"):
                             st.write(f"**Description:** {result['description']}")
                             st.write(f"**Data Type:** {result['data_type']}")
                             st.write(f"**Tissue:** {result['tissue']}")
                             st.write(f"**Organism:** {result['organism']}")
-                            if st.button("Download", key=f"download_{result['accession']}"):
-                                with st.spinner(f"Downloading {result['accession']}..."):
+                            if st.button("Download", key=f"download_{result['database']}_{result['accession']}"):
+                                with st.spinner(f"Downloading {result['accession']} from {result['database']}..."):
                                     try:
-                                        download_path = dataset_discovery.download_dataset(result['accession'])
+                                        download_path = dataset_discovery.download(result['database'], result['accession'])
                                         st.success(f"Dataset downloaded to `{download_path}`")
                                     except Exception as e:
                                         st.error(f"Download failed: {e}")
@@ -45,19 +53,33 @@ def dataset_discovery_page(dataset_discovery):
 def analysis_page(analyzer):
     st.header("🔬 Analysis")
     try:
-        uploaded_file = st.file_uploader("Upload a file for analysis")
+        analysis_type = st.selectbox("Choose Analysis Type", ["Single File Analysis", "Comparative Analysis"])
 
-        if uploaded_file:
-            analysis_type = st.selectbox("Choose Analysis", ["Basic Statistics", "Enrichment Analysis"])
-            if st.button("Run Analysis"):
-                with st.spinner(f"Running {analysis_type}..."):
-                    if analysis_type == "Basic Statistics":
-                        st.session_state['analysis_results'] = analyzer.basic_statistics(uploaded_file, "BED")
-                    elif analysis_type == "Enrichment Analysis":
-                        st.session_state['analysis_results'] = analyzer.enrichment_analysis(uploaded_file)
+        if analysis_type == "Single File Analysis":
+            uploaded_file = st.file_uploader("Upload a file for analysis")
+            if uploaded_file:
+                file_type = st.selectbox("Select File Type", ["Gene Expression", "BED", "Proteomics"])
+                analysis = st.selectbox("Choose Analysis", ["Basic Statistics", "Enrichment Analysis"])
+                if st.button("Run Analysis"):
+                    with st.spinner(f"Running {analysis}..."):
+                        if analysis == "Basic Statistics":
+                            st.session_state['analysis_results'] = analyzer.basic_statistics(uploaded_file, file_type)
+                        elif analysis == "Enrichment Analysis":
+                            st.session_state['analysis_results'] = analyzer.enrichment_analysis(uploaded_file)
+                    st.success("Analysis complete!")
+                    st.write(st.session_state['analysis_results'])
 
-                st.success("Analysis complete!")
-                st.write(st.session_state['analysis_results'])
+        elif analysis_type == "Comparative Analysis":
+            st.subheader("Gene Expression vs. Proteomics")
+            gene_expr_file = st.file_uploader("Upload Gene Expression File")
+            proteomics_file = st.file_uploader("Upload Proteomics File")
+            if gene_expr_file and proteomics_file:
+                if st.button("Run Comparative Analysis"):
+                    with st.spinner("Running comparative analysis..."):
+                        st.session_state['analysis_results'] = analyzer.comparative_analysis(gene_expr_file, proteomics_file)
+                    st.success("Analysis complete!")
+                    st.write(st.session_state['analysis_results'])
+
     except Exception as e:
         st.error("An error occurred on the Analysis page.")
         logging.error(f"Error on Analysis page: {e}", exc_info=True)
@@ -76,6 +98,17 @@ def visualization_page(visualizer):
                     if st.button("Generate Enrichment Plot"):
                         with st.spinner("Generating plot..."):
                             fig = visualizer.create_enrichment_bar_chart(df)
+                            st.plotly_chart(fig)
+
+                # Check if the results are from comparative analysis
+                elif 'correlation_coefficient' in results:
+                    st.subheader("Comparative Analysis Results")
+                    st.write(f"Correlation Coefficient: {results['correlation_coefficient']:.4f}")
+                    st.write(f"P-value: {results['p_value']:.4f}")
+                    if st.button("Generate Correlation Plot"):
+                        with st.spinner("Generating plot..."):
+                            df = results['dataframe']
+                            fig = visualizer.create_correlation_scatter_plot(df, df.columns[1], df.columns[2])
                             st.plotly_chart(fig)
                 else:
                     st.subheader("General Data Visualization")

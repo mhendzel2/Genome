@@ -8,8 +8,8 @@ class DataValidator:
         try:
             # Assuming the uploaded_file is a file-like object
             uploaded_file.seek(0)
-            if file_type in ['Histone Marks', 'ChIP-seq', 'BED']:
-                # BED files are tab-separated, and the first 3 columns are standard
+            if file_type in ['Histone Marks', 'ChIP-seq', 'BED', 'Proteomics']:
+                # These files are typically tab-separated
                 df = pd.read_csv(uploaded_file, sep='\t', header=None)
                 return df
             elif file_type == 'Gene Expression':
