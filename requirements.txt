@@ -5,3 +5,4 @@ gseapy
 cooltools
 scipy
 plotly
+gprofiler-official
