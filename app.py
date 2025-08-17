@@ -3,6 +3,7 @@ from utils.dataset_discovery import DatasetDiscovery
 from utils.visualization import GenomicsVisualizer
 from analysis.analyzer import GenomicsAnalyzer
 import pandas as pd
+import numpy as np
 import logging
 
 # Configure logging
@@ -54,7 +55,14 @@ def analysis_page(analyzer):
                     if analysis_type == "Basic Statistics":
                         st.session_state['analysis_results'] = analyzer.basic_statistics(uploaded_file, "BED")
                     elif analysis_type == "Enrichment Analysis":
-                        st.session_state['analysis_results'] = analyzer.enrichment_analysis(uploaded_file)
+                        # Wrap the uploaded file in the structure expected by the analyzer
+                        wrapped_file = {
+                            uploaded_file.name: {
+                                'file': uploaded_file,
+                                'type': 'Gene Expression'
+                            }
+                        }
+                        st.session_state['analysis_results'] = analyzer.enrichment_analysis(wrapped_file)
 
                 st.success("Analysis complete!")
                 st.write(st.session_state['analysis_results'])
@@ -66,23 +74,24 @@ def visualization_page(visualizer):
     st.header("📈 Visualization")
     try:
         if 'analysis_results' in st.session_state:
-            results = st.session_state['analysis_results']
-            if isinstance(results, list) and results:
-                df = pd.DataFrame(results)
+            results_df = st.session_state['analysis_results']
 
+            if isinstance(results_df, pd.DataFrame) and not results_df.empty:
                 # Check if the results are from enrichment analysis
-                if 'Term' in df.columns and 'Combined Score' in df.columns:
+                if 'p_value' in results_df.columns and 'name' in results_df.columns:
                     st.subheader("Enrichment Analysis Results")
+                    st.dataframe(results_df) # Display the full results table
                     if st.button("Generate Enrichment Plot"):
                         with st.spinner("Generating plot..."):
-                            fig = visualizer.create_enrichment_bar_chart(df)
+                            fig = visualizer.create_enrichment_bar_chart(results_df)
                             st.plotly_chart(fig)
                 else:
                     st.subheader("General Data Visualization")
+                    st.dataframe(results_df)
                     if st.button("Generate Heatmap"):
                         with st.spinner("Generating heatmap..."):
                             # Create a heatmap of numeric columns
-                            numeric_df = df.select_dtypes(include=np.number)
+                            numeric_df = results_df.select_dtypes(include='number')
                             if not numeric_df.empty:
                                 fig = visualizer.create_heatmap(numeric_df)
                                 st.plotly_chart(fig)

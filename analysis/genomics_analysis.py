@@ -3,6 +3,7 @@ import numpy as np
 from typing import Dict, Any, List, Optional
 import tempfile
 import os
+from utils.gprofiler_client import GProfilerClient
 
 class GenomicsAnalyzer:
     """Main genomics analysis coordinator"""
@@ -101,27 +102,12 @@ class GenomicsAnalyzer:
                 except Exception as e:
                     print(f"Error processing {filename}: {e}")
         
-        # Perform basic enrichment analysis
-        results = {
-            'total_genes_analyzed': len(all_genes),
-            'significant_genes': len(significant_genes),
-            'enrichment_score': len(significant_genes) / len(all_genes) if all_genes else 0,
-            'significant_pathways': []
-        }
-        
         if significant_genes:
-            pathway_enrichment = [
-                {'pathway': 'Cell Cycle', 'genes_in_pathway': len([g for g in significant_genes if 'CCND' in g or 'CDK' in g]), 'p_value': 0.001},
-                {'pathway': 'DNA Repair', 'genes_in_pathway': len([g for g in significant_genes if 'BRCA' in g or 'ATM' in g]), 'p_value': 0.003},
-                {'pathway': 'Apoptosis', 'genes_in_pathway': len([g for g in significant_genes if 'TP53' in g or 'BCL' in g]), 'p_value': 0.01},
-                {'pathway': 'Immune Response', 'genes_in_pathway': len([g for g in significant_genes if 'IL' in g or 'TNF' in g]), 'p_value': 0.02},
-            ]
-            
-            significant_pathways = [p for p in pathway_enrichment if p['genes_in_pathway'] > 0 and p['p_value'] < params.get('p_threshold', 0.05)]
-            results['significant_pathways'] = significant_pathways
-            results['total_pathways_tested'] = len(pathway_enrichment)
-        
-        return results
+            gprofiler_client = GProfilerClient()
+            enrichment_results = gprofiler_client.perform_enrichment(list(significant_genes))
+            return enrichment_results
+        else:
+            return pd.DataFrame()
     
     def chromatin_interaction_analysis(self, uploaded_files: Dict[str, Any], **params) -> Dict[str, Any]:
         """Analyze chromatin interaction data (Hi-C)"""
