@@ -1,10 +1,12 @@
 import streamlit as st
 from utils.dataset_discovery import DatasetDiscovery
+from utils.depmap_client import DepMapClient
 from utils.visualization import GenomicsVisualizer
 from analysis.analyzer import GenomicsAnalyzer
 import pandas as pd
 import numpy as np
 import logging
+import os
 
 # Configure logging
 logging.basicConfig(level=logging.INFO,
@@ -12,36 +14,64 @@ logging.basicConfig(level=logging.INFO,
                     filename='app.log',
                     filemode='a')
 
-def dataset_discovery_page(dataset_discovery):
+def dataset_discovery_page(dataset_discovery, depmap_client):
     st.header("🔍 Dataset Discovery")
-    try:
-        search_term = st.text_input("Search ENCODE", placeholder="e.g., H3K4me3, GSE12345")
 
-        if st.button("Search"):
-            with st.spinner("Searching..."):
-                results = dataset_discovery.search_datasets(search_term=search_term)
-                if results:
-                    st.success(f"Found {len(results)} datasets.")
-                    st.session_state['search_results'] = results
-                    for result in results:
-                        with st.expander(f"{result['accession']}: {result['title']}"):
-                            st.write(f"**Description:** {result['description']}")
-                            st.write(f"**Data Type:** {result['data_type']}")
-                            st.write(f"**Tissue:** {result['tissue']}")
-                            st.write(f"**Organism:** {result['organism']}")
-                            if st.button("Download", key=f"download_{result['accession']}"):
-                                with st.spinner(f"Downloading {result['accession']}..."):
-                                    try:
-                                        download_path = dataset_discovery.download_dataset(result['accession'])
-                                        st.success(f"Dataset downloaded to `{download_path}`")
-                                    except Exception as e:
-                                        st.error(f"Download failed: {e}")
-                                        logging.error(f"Download failed for {result['accession']}: {e}", exc_info=True)
-                else:
-                    st.warning("No datasets found.")
-    except Exception as e:
-        st.error("An error occurred on the Dataset Discovery page.")
-        logging.error(f"Error on Dataset Discovery page: {e}", exc_info=True)
+    source = st.selectbox("Select Data Source", ["ENCODE", "DepMap"])
+
+    if source == "ENCODE":
+        try:
+            search_term = st.text_input("Search ENCODE", placeholder="e.g., H3K4me3, GSE12345")
+
+            if st.button("Search"):
+                with st.spinner("Searching..."):
+                    results = dataset_discovery.search_datasets(search_term=search_term)
+                    if results:
+                        st.success(f"Found {len(results)} datasets.")
+                        st.session_state['search_results'] = results
+                        for result in results:
+                            with st.expander(f"{result['accession']}: {result['title']}"):
+                                st.write(f"**Description:** {result['description']}")
+                                st.write(f"**Data Type:** {result['data_type']}")
+                                st.write(f"**Tissue:** {result['tissue']}")
+                                st.write(f"**Organism:** {result['organism']}")
+                                if st.button("Download", key=f"download_{result['accession']}"):
+                                    with st.spinner(f"Downloading {result['accession']}..."):
+                                        try:
+                                            download_path = dataset_discovery.download_dataset(result['accession'])
+                                            st.success(f"Dataset downloaded to `{download_path}`")
+                                        except Exception as e:
+                                            st.error(f"Download failed: {e}")
+                                            logging.error(f"Download failed for {result['accession']}: {e}", exc_info=True)
+                    else:
+                        st.warning("No datasets found.")
+        except Exception as e:
+            st.error("An error occurred on the Dataset Discovery page.")
+            logging.error(f"Error on Dataset Discovery page: {e}", exc_info=True)
+
+    elif source == "DepMap":
+        try:
+            st.subheader("DepMap Data Files (Release 24Q4)")
+            files = depmap_client.list_files_in_release()
+            if files:
+                for f in files:
+                    with st.expander(f"{f['name']}"):
+                        st.write(f"**File Size:** {f['size'] / 1e6:.2f} MB")
+                        if st.button("Download", key=f"download_{f['id']}"):
+                            with st.spinner(f"Downloading {f['name']}..."):
+                                download_dir = "downloads/depmap"
+                                os.makedirs(download_dir, exist_ok=True)
+                                local_filename = os.path.join(download_dir, f['name'])
+                                success = depmap_client.download_file(f['download_url'], local_filename)
+                                if success:
+                                    st.success(f"File downloaded to `{local_filename}`")
+                                else:
+                                    st.error("Download failed.")
+            else:
+                st.warning("Could not retrieve file list from DepMap/Figshare.")
+        except Exception as e:
+            st.error("An error occurred while fetching DepMap data.")
+            logging.error(f"Error on DepMap section: {e}", exc_info=True)
 
 def analysis_page(analyzer):
     st.header("🔬 Analysis")
@@ -116,6 +146,7 @@ def main():
     st.sidebar.title("Navigation")
     
     dataset_discovery = DatasetDiscovery()
+    depmap_client = DepMapClient()
     visualizer = GenomicsVisualizer()
     analyzer = GenomicsAnalyzer()
     
@@ -127,7 +158,7 @@ def main():
     if page == "Home":
         st.write("Welcome to the new and improved Genomics Data Analysis Platform!")
     elif page == "Dataset Discovery":
-        dataset_discovery_page(dataset_discovery)
+        dataset_discovery_page(dataset_discovery, depmap_client)
     elif page == "Analysis":
         analysis_page(analyzer)
     elif page == "Visualization":
