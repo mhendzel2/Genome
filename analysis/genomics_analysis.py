@@ -4,6 +4,7 @@ from typing import Dict, Any, List, Optional
 import tempfile
 import os
 from utils.gprofiler_client import GProfilerClient
+from statsmodels.stats.multitest import fdrcorrection
 
 class GenomicsAnalyzer:
     """Main genomics analysis coordinator"""
@@ -58,7 +59,15 @@ class GenomicsAnalyzer:
         if not expr_files:
             return {'error': 'No gene expression data found'}
         
-        return self.r_integration.differential_expression(expr_files, **params)
+        results = self.r_integration.differential_expression(expr_files, **params)
+
+        if isinstance(results, dict) and 'pvalue' in results:
+            pvals = results['pvalue']
+            if isinstance(pvals, list) and len(pvals) > 0:
+                _, padj = fdrcorrection(pvals)
+                results['padj'] = padj.tolist()
+
+        return results
     
     def tissue_comparison(self, tissues: List[str], comparison_type: str, 
                          uploaded_files: Dict[str, Any]) -> Dict[str, Any]:

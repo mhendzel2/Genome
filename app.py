@@ -3,6 +3,7 @@ from utils.dataset_discovery import DatasetDiscovery
 from utils.depmap_client import DepMapClient
 from utils.visualization import GenomicsVisualizer
 from analysis.analyzer import GenomicsAnalyzer
+from utils.r_integration import RIntegration
 import pandas as pd
 import numpy as np
 import logging
@@ -76,26 +77,68 @@ def dataset_discovery_page(dataset_discovery, depmap_client):
 def analysis_page(analyzer):
     st.header("🔬 Analysis")
     try:
-        uploaded_file = st.file_uploader("Upload a file for analysis")
+        analysis_type = st.selectbox("Choose Analysis", ["Basic Statistics", "Enrichment Analysis", "Differential Expression", "Quality Control"])
 
-        if uploaded_file:
-            analysis_type = st.selectbox("Choose Analysis", ["Basic Statistics", "Enrichment Analysis"])
+        if analysis_type == "Differential Expression":
+            st.subheader("Differential Expression Analysis")
+            col1, col2 = st.columns(2)
+            with col1:
+                control_files = st.file_uploader("Upload Control Group Files", accept_multiple_files=True)
+            with col2:
+                treatment_files = st.file_uploader("Upload Treatment Group Files", accept_multiple_files=True)
+
             if st.button("Run Analysis"):
-                with st.spinner(f"Running {analysis_type}..."):
-                    if analysis_type == "Basic Statistics":
-                        st.session_state['analysis_results'] = analyzer.basic_statistics(uploaded_file, "BED")
-                    elif analysis_type == "Enrichment Analysis":
-                        # Wrap the uploaded file in the structure expected by the analyzer
-                        wrapped_file = {
-                            uploaded_file.name: {
-                                'file': uploaded_file,
-                                'type': 'Gene Expression'
-                            }
-                        }
-                        st.session_state['analysis_results'] = analyzer.enrichment_analysis(wrapped_file)
+                if control_files and treatment_files:
+                    with st.spinner("Running Differential Expression Analysis..."):
+                        st.session_state['uploaded_data'] = {'control': control_files, 'treatment': treatment_files}
+                        st.session_state['analysis_results'] = analyzer.differential_expression(
+                            st.session_state['uploaded_data']
+                        )
+                        st.success("Analysis complete!")
+                        st.write(st.session_state['analysis_results'])
+                else:
+                    st.warning("Please upload files for both control and treatment groups.")
 
-                st.success("Analysis complete!")
-                st.write(st.session_state['analysis_results'])
+        elif analysis_type == "Quality Control":
+            st.subheader("Quality Control")
+            uploaded_files = st.file_uploader("Upload files for QC", accept_multiple_files=True)
+            file_type = st.selectbox("Select File Type", ["Gene Expression", "ChIP-seq", "Other"])
+
+            if st.button("Run QC"):
+                if uploaded_files:
+                    with st.spinner("Running Quality Control..."):
+                        st.session_state['uploaded_data'] = uploaded_files
+                        wrapped_files = {
+                            f.name: {'file': f, 'type': file_type} for f in uploaded_files
+                        }
+                        results = analyzer.quality_control(wrapped_files)
+                        st.session_state['analysis_results'] = pd.DataFrame.from_dict(results, orient='index')
+                        st.success("QC complete!")
+                        st.write(st.session_state['analysis_results'])
+                else:
+                    st.warning("Please upload at least one file.")
+
+        else:
+            uploaded_file = st.file_uploader("Upload a file for analysis")
+            if uploaded_file:
+                if st.button("Run Analysis"):
+                    with st.spinner(f"Running {analysis_type}..."):
+                        st.session_state['uploaded_data'] = [uploaded_file]
+                        if analysis_type == "Basic Statistics":
+                            st.session_state['analysis_results'] = analyzer.basic_statistics(
+                                {uploaded_file.name: {'file': uploaded_file, 'type': 'BED'}}
+                            )
+                        elif analysis_type == "Enrichment Analysis":
+                            wrapped_file = {
+                                uploaded_file.name: {
+                                    'file': uploaded_file,
+                                    'type': 'Gene Expression'
+                                }
+                            }
+                            st.session_state['analysis_results'] = analyzer.enrichment_analysis(wrapped_file)
+                    st.success("Analysis complete!")
+                    st.write(st.session_state['analysis_results'])
+
     except Exception as e:
         st.error("An error occurred on the Analysis page.")
         logging.error(f"Error on Analysis page: {e}", exc_info=True)
@@ -120,13 +163,26 @@ def visualization_page(visualizer):
                     st.dataframe(results_df)
                     if st.button("Generate Heatmap"):
                         with st.spinner("Generating heatmap..."):
-                            # Create a heatmap of numeric columns
                             numeric_df = results_df.select_dtypes(include='number')
                             if not numeric_df.empty:
                                 fig = visualizer.create_heatmap(numeric_df)
                                 st.plotly_chart(fig)
                             else:
                                 st.warning("No numeric data available for a heatmap.")
+
+                if st.button("Generate PCA Plot"):
+                    with st.spinner("Generating PCA plot..."):
+                        if 'uploaded_data' in st.session_state:
+                            uploaded_data = st.session_state['uploaded_data']
+                            if isinstance(uploaded_data, dict):
+                                files_to_plot = [f for group in uploaded_data.values() for f in group]
+                            else:
+                                files_to_plot = uploaded_data
+
+                            fig = visualizer.create_pca_plot(files_to_plot)
+                            st.plotly_chart(fig)
+                        else:
+                            st.warning("Uploaded data not found. Please run an analysis first.")
             else:
                 st.info("Run an analysis to generate results to visualize.")
         else:
@@ -148,7 +204,8 @@ def main():
     dataset_discovery = DatasetDiscovery()
     depmap_client = DepMapClient()
     visualizer = GenomicsVisualizer()
-    analyzer = GenomicsAnalyzer()
+    r_integration = RIntegration()
+    analyzer = GenomicsAnalyzer(r_integration)
     
     page = st.sidebar.selectbox(
         "Choose a section",

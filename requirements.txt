@@ -6,3 +6,5 @@ cooltools
 scipy
 plotly
 gprofiler-official
+statsmodels
+scikit-learn
