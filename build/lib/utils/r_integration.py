@@ -7,45 +7,45 @@ import pandas as pd
 
 class RIntegration:
     """Handles R integration for genomics analysis"""
-    
+
     def __init__(self):
         self.r_available = self._check_r_availability()
         self.required_packages = [
             'GenomicRanges',
-            'DESeq2', 
+            'DESeq2',
             'ChIPseeker',
             'HiCcompare',
             'BiocManager',
             'dplyr',
             'ggplot2'
         ]
-        
+
         if self.r_available:
             self._install_required_packages()
-    
+
     def _check_r_availability(self) -> bool:
         """Check if R is available on the system"""
         try:
-            result = subprocess.run(['R', '--version'], 
+            result = subprocess.run(['R', '--version'],
                                   capture_output=True, text=True, timeout=10)
             return result.returncode == 0
         except (subprocess.TimeoutExpired, FileNotFoundError):
             return False
-    
+
     def _install_required_packages(self):
         """Install required R packages"""
         if not self.r_available:
             return
-        
+
         install_script = '''
         # Install BiocManager if not available
         if (!requireNamespace("BiocManager", quietly = TRUE)) {
             install.packages("BiocManager", repos="https://cran.r-project.org")
         }
-        
+
         # Required packages
         required_packages <- c("GenomicRanges", "DESeq2", "ChIPseeker", "dplyr", "ggplot2")
-        
+
         # Install missing packages
         for (pkg in required_packages) {
             if (!requireNamespace(pkg, quietly = TRUE)) {
@@ -56,23 +56,23 @@ class RIntegration:
                 }
             }
         }
-        
+
         cat("Package installation completed\\n")
         '''
-        
+
         try:
             self._execute_r_script(install_script)
         except Exception as e:
             print(f"Warning: Could not install R packages: {e}")
-    
+
     def _execute_r_script(self, script: str, data_files: Optional[Dict[str, str]] = None) -> str:
         """Execute R script safely with input validation"""
         if not self.r_available:
             raise RuntimeError("R is not available on this system")
-        
+
         if not self._validate_r_script(script):
             raise ValueError("R script contains potentially unsafe content")
-        
+
         import logging
         logger = logging.getLogger(__name__)
 
@@ -118,7 +118,7 @@ class RIntegration:
             except subprocess.TimeoutExpired:
                 logger.exception('R script execution timed out')
                 raise RuntimeError("R script execution timed out")
-    
+
     def _validate_r_script(self, script: str) -> bool:
         """Validate R script for security issues"""
         dangerous_patterns = [
@@ -126,29 +126,29 @@ class RIntegration:
             'file.remove(', 'unlink(', 'file.create(',
             'source(', 'eval(', 'parse('
         ]
-        
+
         script_lower = script.lower()
         for pattern in dangerous_patterns:
             if pattern.lower() in script_lower:
                 return False
-        
+
         return True
-    
+
     def _sanitize_filename(self, filename: str) -> str:
         """Sanitize filename to prevent path traversal attacks"""
         import re
         safe_name = re.sub(r'[^\w\-_\.]', '_', filename)
         safe_name = re.sub(r'^[\.\-]+', '', safe_name)
         return safe_name[:100] if safe_name else 'data_file.txt'
-    
+
     def basic_statistics(self, data_files: Dict[str, Any]) -> Dict[str, Any]:
         """Compute basic statistics using R"""
         if not self.r_available:
             # Fallback to Python-based statistics
             return self._python_basic_statistics(data_files)
-        
+
         results = {}
-        
+
         for filename, file_info in data_files.items():
             try:
                 # Prepare file content mapping; support file-like objects
@@ -215,35 +215,35 @@ class RIntegration:
                 except Exception:
                     # Fallback to basic parsing
                     results[filename] = {'total_regions': 'N/A', 'error': 'Could not parse R output'}
-                
+
             except Exception as e:
                 results[filename] = {'error': f'Analysis failed: {str(e)}'}
-        
+
         return results
-    
+
     def _python_basic_statistics(self, data_files: Dict[str, Any]) -> Dict[str, Any]:
         """Fallback Python-based basic statistics"""
         results = {}
-        
+
         for filename, file_info in data_files.items():
             try:
                 # Read file content
                 file_info['file'].seek(0)
                 content = file_info['file'].read().decode('utf-8')
-                lines = [line for line in content.split('\n') 
+                lines = [line for line in content.split('\n')
                         if line.strip() and not line.startswith('#')]
-                
+
                 stats = {}
                 stats['total_regions'] = len(lines)
-                
+
                 if lines:
                     # Parse first line to determine format
                     first_line = lines[0].split('\t')
-                    
+
                     # Extract scores if available (4th column)
                     scores = []
                     lengths = []
-                    
+
                     for line in lines:
                         fields = line.split('\t')
                         if len(fields) >= 4:
@@ -252,7 +252,7 @@ class RIntegration:
                                 scores.append(score)
                             except ValueError:
                                 pass
-                        
+
                         if len(fields) >= 3:
                             try:
                                 start = int(fields[1])
@@ -261,28 +261,28 @@ class RIntegration:
                                     lengths.append(end - start)
                             except ValueError:
                                 pass
-                    
+
                     # Score statistics
                     if scores:
                         stats['mean_score'] = sum(scores) / len(scores)
                         stats['median_score'] = sorted(scores)[len(scores)//2]
                         stats['max_score'] = max(scores)
                         stats['min_score'] = min(scores)
-                    
+
                     # Length statistics
                     if lengths:
                         stats['mean_length'] = sum(lengths) / len(lengths)
                         stats['median_length'] = sorted(lengths)[len(lengths)//2]
                         stats['max_length'] = max(lengths)
                         stats['min_length'] = min(lengths)
-                
+
                 results[filename] = stats
-                
+
             except Exception as e:
                 results[filename] = {'error': f'Analysis failed: {str(e)}'}
-        
+
         return results
-    
+
     def peak_calling(self, data_files: Dict[str, Any], **params) -> List[Dict[str, Any]]:
         """Perform peak calling analysis"""
         if not self.r_available:
@@ -334,19 +334,19 @@ class RIntegration:
                     logger.exception('Error calling peaks for %s: %s', filename, e)
 
         return results
-    
+
     def _python_peak_calling(self, data_files: Dict[str, Any], **params) -> List[Dict[str, Any]]:
         """Python fallback for peak calling"""
         peaks = []
         threshold = params.get('fold_change', 2.0)
-        
+
         for filename, file_info in data_files.items():
             try:
                 file_info['file'].seek(0)
                 content = file_info['file'].read().decode('utf-8')
-                lines = [line for line in content.split('\n') 
+                lines = [line for line in content.split('\n')
                         if line.strip() and not line.startswith('#')]
-                
+
                 for line in lines:
                     fields = line.split('\t')
                     if len(fields) >= 4:
@@ -355,7 +355,7 @@ class RIntegration:
                             start = int(fields[1])
                             end = int(fields[2])
                             score = float(fields[3])
-                            
+
                             if score > threshold:
                                 peaks.append({
                                     'chr': chr_name,
@@ -367,12 +367,12 @@ class RIntegration:
                                 })
                         except (ValueError, IndexError):
                             continue
-            
+
             except Exception as e:
                 print(f"Error in peak calling for {filename}: {e}")
-        
+
         return peaks
-    
+
     def differential_expression(self, data_files: Dict[str, Any], **params) -> Dict[str, Any]:
         """Perform differential expression analysis"""
         import logging
@@ -422,7 +422,7 @@ class RIntegration:
         except Exception as e:
             logger.exception('Differential expression analysis failed for %s: %s', first_file_key, e)
             return pd.DataFrame()
-    
+
     def tissue_comparison(self, tissues: List[str], comparison_type: str, data_files: Dict[str, Any]) -> Dict[str, Any]:
         """Perform tissue comparison analysis"""
         import logging

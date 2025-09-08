@@ -1,4 +1,5 @@
 import streamlit as st
+import streamlit.components.v1 as components
 from utils.dataset_discovery import DatasetDiscovery
 from utils.depmap_client import DepMapClient
 from utils.visualization import GenomicsVisualizer
@@ -77,9 +78,48 @@ def dataset_discovery_page(dataset_discovery, depmap_client):
 def analysis_page(analyzer):
     st.header("🔬 Analysis")
     try:
-        analysis_type = st.selectbox("Choose Analysis", ["Basic Statistics", "Enrichment Analysis", "Differential Expression", "Quality Control"])
+        analysis_options = ["Basic Statistics", "Enrichment Analysis", "Differential Expression", "Quality Control", "Multi-omics Integration", "Chromatin Interaction"]
+        analysis_type = st.selectbox("Choose Analysis", analysis_options)
 
-        if analysis_type == "Differential Expression":
+        if analysis_type == "Chromatin Interaction":
+            st.subheader("Chromatin Interaction Analysis (BEDPE)")
+            uploaded_file = st.file_uploader("Upload Hi-C Data File (.bedpe)", accept_multiple_files=False)
+            if st.button("Run Analysis"):
+                if uploaded_file:
+                    with st.spinner("Parsing Hi-C data..."):
+                        wrapped_file = {uploaded_file.name: {'file': uploaded_file, 'type': 'HiC'}}
+                        st.session_state['uploaded_data'] = wrapped_file
+                        results = analyzer.chromatin_interaction_analysis(wrapped_file)
+                        st.session_state['analysis_results'] = results
+                        st.session_state['analysis_type'] = "Hi-C"
+                        st.success("Analysis complete!")
+                        st.write(f"Parsed {len(results)} interactions.")
+                        st.dataframe(results.head())
+                else:
+                    st.warning("Please upload a file for analysis.")
+
+        elif analysis_type == "Multi-omics Integration":
+            st.subheader("Multi-omics Integration Analysis")
+            uploaded_files = st.file_uploader("Upload Omics Files (at least 2)", accept_multiple_files=True)
+            corr_threshold = st.slider("Correlation Threshold", 0.5, 1.0, 0.7, 0.05)
+
+            if st.button("Run Analysis"):
+                if uploaded_files and len(uploaded_files) >= 2:
+                    with st.spinner("Running Multi-omics Integration..."):
+                        wrapped_files = {
+                            f.name: {'file': f, 'type': 'Omics'} for f in uploaded_files
+                        }
+                        st.session_state['uploaded_data'] = wrapped_files
+                        results = analyzer.multi_omics_integration(wrapped_files, correlation_threshold=corr_threshold)
+                        st.session_state['analysis_results'] = results
+                        st.session_state['analysis_type'] = "Multi-omics"
+                        st.success("Analysis complete!")
+                        st.write(f"Found {len(results)} significant correlations.")
+                        st.dataframe(results)
+                else:
+                    st.warning("Please upload at least two files for integration.")
+
+        elif analysis_type == "Differential Expression":
             st.subheader("Differential Expression Analysis")
             col1, col2 = st.columns(2)
             with col1:
@@ -90,12 +130,16 @@ def analysis_page(analyzer):
             if st.button("Run Analysis"):
                 if control_files and treatment_files:
                     with st.spinner("Running Differential Expression Analysis..."):
+                        # For simplicity, we'll just use the first control file for this example
+                        # A real implementation would handle both groups properly in the R script
                         st.session_state['uploaded_data'] = {'control': control_files, 'treatment': treatment_files}
-                        st.session_state['analysis_results'] = analyzer.differential_expression(
-                            st.session_state['uploaded_data']
-                        )
+                        wrapped_files = {f.name: {'file': f, 'type': 'Gene Expression'} for f in control_files}
+
+                        results = analyzer.differential_expression(wrapped_files)
+                        st.session_state['analysis_results'] = results
+                        st.session_state['analysis_type'] = "DE"
                         st.success("Analysis complete!")
-                        st.write(st.session_state['analysis_results'])
+                        st.dataframe(results.head())
                 else:
                     st.warning("Please upload files for both control and treatment groups.")
 
@@ -150,8 +194,47 @@ def visualization_page(visualizer):
             results_df = st.session_state['analysis_results']
 
             if isinstance(results_df, pd.DataFrame) and not results_df.empty:
+                analysis_type = st.session_state.get('analysis_type')
+
+                if analysis_type == "Hi-C":
+                    st.subheader("Chromatin Interaction (Circos Plot)")
+                    st.dataframe(results_df.head())
+                    if st.button("Generate Circos Plot"):
+                        with st.spinner("Generating Circos plot... This may take a moment."):
+                            circos_path = visualizer.create_circos_plot(results_df)
+                            if circos_path:
+                                st.image(circos_path)
+                                os.remove(circos_path) # Clean up temp file
+                            else:
+                                st.warning("Could not generate Circos plot.")
+
+                elif analysis_type == "Multi-omics":
+                    st.subheader("Multi-omics Correlation Network")
+                    st.dataframe(results_df)
+                    if st.button("Generate Network Graph"):
+                        with st.spinner("Generating network graph..."):
+                            network_html_path = visualizer.create_network_graph(results_df)
+                            if network_html_path:
+                                with open(network_html_path, 'r', encoding='utf-8') as f:
+                                    html_code = f.read()
+                                components.html(html_code, height=800)
+                                os.remove(network_html_path) # Clean up the temp file
+                            else:
+                                st.warning("Could not generate network graph.")
+
+                # Check if the results are from differential expression
+                elif analysis_type == "DE" and 'log2FoldChange' in results_df.columns and 'pvalue' in results_df.columns:
+                    st.subheader("Differential Expression Results")
+                    st.dataframe(results_df)
+                    lfc_thresh = st.slider("Log Fold Change Threshold", 0.0, 5.0, 1.0, 0.1)
+                    pval_thresh = st.slider("P-value Threshold", 0.0, 0.1, 0.05, 0.001)
+                    if st.button("Generate Volcano Plot"):
+                        with st.spinner("Generating volcano plot..."):
+                            fig = visualizer.create_volcano_plot(results_df, lfc_threshold=lfc_thresh, p_value_threshold=pval_thresh)
+                            st.plotly_chart(fig)
+
                 # Check if the results are from enrichment analysis
-                if 'p_value' in results_df.columns and 'name' in results_df.columns:
+                elif 'pvalue' in results_df.columns and 'name' in results_df.columns:
                     st.subheader("Enrichment Analysis Results")
                     st.dataframe(results_df) # Display the full results table
                     if st.button("Generate Enrichment Plot"):
@@ -170,16 +253,18 @@ def visualization_page(visualizer):
                             else:
                                 st.warning("No numeric data available for a heatmap.")
 
+                st.subheader("Principal Component Analysis (PCA)")
+                pca_dims = st.radio("Select PCA Dimensions", (2, 3), horizontal=True)
                 if st.button("Generate PCA Plot"):
-                    with st.spinner("Generating PCA plot..."):
+                    with st.spinner(f"Generating {pca_dims}D PCA plot..."):
                         if 'uploaded_data' in st.session_state:
                             uploaded_data = st.session_state['uploaded_data']
-                            if isinstance(uploaded_data, dict):
+                            if isinstance(uploaded_data, dict): # Handle dict of lists of files
                                 files_to_plot = [f for group in uploaded_data.values() for f in group]
-                            else:
+                            else: # Handle list of files
                                 files_to_plot = uploaded_data
 
-                            fig = visualizer.create_pca_plot(files_to_plot)
+                            fig = visualizer.create_pca_plot(files_to_plot, dimensions=pca_dims)
                             st.plotly_chart(fig)
                         else:
                             st.warning("Uploaded data not found. Please run an analysis first.")
