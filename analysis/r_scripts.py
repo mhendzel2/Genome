@@ -49,7 +49,16 @@ compute_basic_stats <- function(data_file) {
 }
 
 # Main execution
+results <- NULL
+# Default: try processing a single input placeholder named "input"
+try({
+    results <- compute_basic_stats("{file:input}")
+}, silent = TRUE)
+
+# If default processing didn't populate results, fall back to injected processing code
+if (is.null(results) || length(results) == 0) {
 {file_processing_code}
+}
 
 # Output results as JSON
 cat(jsonlite::toJSON(results, auto_unbox = TRUE))
@@ -98,7 +107,15 @@ call_peaks <- function(data_file, p_threshold = 0.05, fold_change = 2.0) {
 }
 
 # Main execution
+results <- NULL
+# Default: try processing a single input placeholder named "input"
+try({
+    results <- call_peaks("{file:input}")
+}, silent = TRUE)
+
+if (is.null(results) || length(results) == 0) {
 {file_processing_code}
+}
 
 # Output results
 cat(jsonlite::toJSON(results, auto_unbox = TRUE))
@@ -148,8 +165,18 @@ perform_diff_expression <- function(count_matrix, sample_info, padj_threshold = 
     return(results)
 }
 
-# Main execution would process uploaded files
+# Main execution
+results <- NULL
+# Default: expect two placeholders: counts and samples
+try({
+    count_matrix <- as.matrix(read.table("{file:counts}", sep = "\t", header = TRUE, row.names = 1))
+    sample_info <- read.table("{file:samples}", sep = "\t", header = TRUE, row.names = 1)
+    results <- perform_diff_expression(count_matrix, sample_info)
+}, silent = TRUE)
+
+if (is.null(results) || length(results) == 0) {
 {file_processing_code}
+}
 
 # Output results
 cat(jsonlite::toJSON(results, auto_unbox = TRUE))
@@ -205,7 +232,15 @@ compare_tissues <- function(tissue1_file, tissue2_file) {
 }
 
 # Main execution
+results <- NULL
+# Default: expect two placeholders named tissue1 and tissue2
+try({
+    results <- compare_tissues("{file:tissue1}", "{file:tissue2}")
+}, silent = TRUE)
+
+if (is.null(results) || length(results) == 0) {
 {file_processing_code}
+}
 
 # Output results
 cat(jsonlite::toJSON(results, auto_unbox = TRUE))
@@ -254,7 +289,15 @@ analyze_hic_interactions <- function(hic_file, resolution = 10000) {
 }
 
 # Main execution
+results <- NULL
+# Default: expect a placeholder named hic
+try({
+    results <- analyze_hic_interactions("{file:hic}")
+}, silent = TRUE)
+
+if (is.null(results) || length(results) == 0) {
 {file_processing_code}
+}
 
 # Output results
 cat(jsonlite::toJSON(results, auto_unbox = TRUE))
@@ -326,7 +369,15 @@ perform_qc <- function(data_file, data_type = "bed") {
 }
 
 # Main execution
+results <- NULL
+# Default: try processing a single input placeholder named "input"
+try({
+    results <- perform_qc("{file:input}")
+}, silent = TRUE)
+
+if (is.null(results) || length(results) == 0) {
 {file_processing_code}
+}
 
 # Output results
 cat(jsonlite::toJSON(results, auto_unbox = TRUE))

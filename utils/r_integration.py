@@ -287,47 +287,53 @@ class RIntegration:
         """Perform peak calling analysis"""
         if not self.r_available:
             return self._python_peak_calling(data_files, **params)
-        
-        # This would implement R-based peak calling using appropriate packages
-        # For now, return mock results to demonstrate structure
-        peaks = []
-        
-        # Simple peak calling simulation
+
+        import logging
+        logger = logging.getLogger(__name__)
+
+        results = []
+        threshold = float(params.get('fold_change', 2.0))
+
         for filename, file_info in data_files.items():
-            if 'chip' in filename.lower() or file_info['type'] == 'ChIP-seq':
+            if 'chip' in filename.lower() or file_info.get('type') == 'ChIP-seq':
                 try:
-                    # Read file and identify potential peaks
-                    file_info['file'].seek(0)
-                    content = file_info['file'].read().decode('utf-8')
-                    lines = [line for line in content.split('\n') 
-                            if line.strip() and not line.startswith('#')]
-                    
-                    for i, line in enumerate(lines[:100]):  # Limit for demo
-                        fields = line.split('\t')
-                        if len(fields) >= 4:
-                            try:
-                                chr_name = fields[0]
-                                start = int(fields[1])
-                                end = int(fields[2])
-                                score = float(fields[3])
-                                
-                                # Simple threshold-based peak calling
-                                if score > params.get('fold_change', 2.0):
-                                    peaks.append({
-                                        'chr': chr_name,
-                                        'start': start,
-                                        'end': end,
-                                        'score': score,
-                                        'length': end - start,
-                                        'file': filename
-                                    })
-                            except (ValueError, IndexError):
-                                continue
-                
+                    try:
+                        file_info['file'].seek(0)
+                    except Exception:
+                        pass
+                    raw = file_info['file'].read()
+                    content = raw.decode('utf-8') if isinstance(raw, bytes) else raw
+
+                    payload = {filename: content}
+
+                    r_script = '''
+                    library(jsonlite)
+                    dat <- read.table(file = "{file:%s}", sep = "\t", header = FALSE, comment.char = "#")
+                    peaks <- list()
+                    if (ncol(dat) >= 4) {
+                        for (i in seq_len(min(nrow(dat), 100))) {
+                            row <- dat[i, ]
+                            score <- as.numeric(row[[4]])
+                            if (!is.na(score) && score > %f) {
+                                peaks[[length(peaks) + 1]] <- list(chr = as.character(row[[1]]), start = as.integer(row[[2]]), end = as.integer(row[[3]]), score = score)
+                            }
+                        }
+                    }
+                    cat(toJSON(peaks, auto_unbox = TRUE))
+                    ''' % (filename, threshold)
+
+                    out = self._execute_r_script(r_script, data_files=payload)
+                    import json as _json
+                    parsed = _json.loads(out.strip()) if out and out.strip() else []
+                    for p in parsed:
+                        p['file'] = filename
+                        if 'length' not in p and 'start' in p and 'end' in p:
+                            p['length'] = p.get('end', 0) - p.get('start', 0)
+                        results.append(p)
                 except Exception as e:
-                    print(f"Error processing {filename}: {e}")
-        
-        return peaks
+                    logger.exception('Error calling peaks for %s: %s', filename, e)
+
+        return results
     
     def _python_peak_calling(self, data_files: Dict[str, Any], **params) -> List[Dict[str, Any]]:
         """Python fallback for peak calling"""
@@ -369,88 +375,93 @@ class RIntegration:
     
     def differential_expression(self, data_files: Dict[str, Any], **params) -> Dict[str, Any]:
         """Perform differential expression analysis"""
-        # This would use DESeq2 for proper differential expression analysis
-        # For now, return mock results
-        
-        results = {
-            'upregulated': 0,
-            'downregulated': 0,
-            'total_genes': 0,
-            'significant_genes': 0
-        }
-        
-        # Count genes from uploaded files
-        total_genes = 0
+        import logging
+        logger = logging.getLogger(__name__)
+
+        if not self.r_available:
+            return self._python_basic_statistics(data_files)
+
+        stats = {'upregulated': 0, 'downregulated': 0, 'total_genes': 0, 'significant_genes': 0}
         for filename, file_info in data_files.items():
-            if 'expression' in filename.lower() or file_info['type'] == 'Gene Expression':
+            if 'expression' in filename.lower() or file_info.get('type') == 'Gene Expression':
                 try:
-                    file_info['file'].seek(0)
-                    content = file_info['file'].read().decode('utf-8')
-                    lines = [line for line in content.split('\n') 
-                            if line.strip() and not line.startswith('#')]
-                    total_genes += len(lines)
-                except:
-                    pass
-        
-        results['total_genes'] = total_genes
-        
-        # Simulate differential expression results
-        if total_genes > 0:
-            results['upregulated'] = int(total_genes * 0.1)  # 10% upregulated
-            results['downregulated'] = int(total_genes * 0.08)  # 8% downregulated
-            results['significant_genes'] = results['upregulated'] + results['downregulated']
-        
-        return results
+                    try:
+                        file_info['file'].seek(0)
+                    except Exception:
+                        pass
+                    raw = file_info['file'].read()
+                    content = raw.decode('utf-8') if isinstance(raw, bytes) else raw
+
+                    payload = {filename: content}
+                    r_script = '''
+                    library(jsonlite)
+                    dat <- read.table(file = "{file:%s}", sep = "\t", header = TRUE, comment.char = "#", stringsAsFactors = FALSE)
+                    res <- list()
+                    res$total_genes <- nrow(dat)
+                    if ('log2FoldChange' %%in%% colnames(dat)) {
+                        up <- sum(dat$log2FoldChange > 0, na.rm = TRUE)
+                        down <- sum(dat$log2FoldChange < 0, na.rm = TRUE)
+                        res$upregulated <- up
+                        res$downregulated <- down
+                        res$significant_genes <- up + down
+                    } else {
+                        res$upregulated <- 0
+                        res$downregulated <- 0
+                        res$significant_genes <- 0
+                    }
+                    cat(toJSON(res, auto_unbox = TRUE))
+                    ''' % (filename)
+
+                    out = self._execute_r_script(r_script, data_files=payload)
+                    import json as _json
+                    parsed = _json.loads(out.strip())
+                    stats.update(parsed)
+                except Exception as e:
+                    logger.exception('DE failed for %s: %s', filename, e)
+
+        return stats
     
     def tissue_comparison(self, tissues: List[str], comparison_type: str, data_files: Dict[str, Any]) -> Dict[str, Any]:
         """Perform tissue comparison analysis"""
-        results = {
-            'tissues_compared': tissues,
-            'comparison_type': comparison_type,
-            'common_features': 0,
-            'unique_tissue1': 0,
-            'unique_tissue2': 0,
-            'total_features': 0
-        }
-        
-        # Simple overlap analysis
-        tissue1_features = set()
-        tissue2_features = set()
-        
-        for filename, file_info in data_files.items():
-            try:
-                file_info['file'].seek(0)
-                content = file_info['file'].read().decode('utf-8')
-                lines = [line for line in content.split('\n') 
-                        if line.strip() and not line.startswith('#')]
-                
-                features = set()
-                for line in lines:
-                    fields = line.split('\t')
-                    if len(fields) >= 3:
-                        # Create feature identifier
-                        feature_id = f"{fields[0]}:{fields[1]}-{fields[2]}"
-                        features.add(feature_id)
-                
-                # Assign to tissues based on filename
-                if tissues[0].lower() in filename.lower():
-                    tissue1_features.update(features)
-                elif tissues[1].lower() in filename.lower():
-                    tissue2_features.update(features)
-            
-            except Exception as e:
-                print(f"Error processing {filename} for tissue comparison: {e}")
-        
-        # Calculate overlaps
-        common = tissue1_features.intersection(tissue2_features)
-        unique1 = tissue1_features - tissue2_features
-        unique2 = tissue2_features - tissue1_features
-        
-        results.update({
-            'common_features': len(common),
-            'unique_tissue1': len(unique1),
-            'unique_tissue2': len(unique2),
-            'total_features': len(tissue1_features.union(tissue2_features))
-        })
-        
+        import logging
+        logger = logging.getLogger(__name__)
+
+        results = {'tissues_compared': tissues, 'comparison_type': comparison_type, 'common_features': 0, 'unique_tissue1': 0, 'unique_tissue2': 0, 'total_features': 0}
+
+        try:
+            payload = {}
+            for filename, file_info in data_files.items():
+                try:
+                    try:
+                        file_info['file'].seek(0)
+                    except Exception:
+                        pass
+                    raw = file_info['file'].read()
+                    content = raw.decode('utf-8') if isinstance(raw, bytes) else raw
+                    payload[filename] = content
+                except Exception as e:
+                    logger.exception('Could not read %s: %s', filename, e)
+
+            if len(payload) >= 2:
+                names = list(payload.keys())
+                f1 = names[0]
+                f2 = names[1]
+                r_script = '''
+                    library(jsonlite)
+                    a <- read.table(file = "{file:%s}", sep = "\t", header = FALSE, comment.char = "#")
+                    b <- read.table(file = "{file:%s}", sep = "\t", header = FALSE, comment.char = "#")
+                    fa <- apply(a[,1:3], 1, function(x) paste0(x[1], ':', x[2], '-', x[3]))
+                    fb <- apply(b[,1:3], 1, function(x) paste0(x[1], ':', x[2], '-', x[3]))
+                    common <- length(intersect(fa, fb))
+                    res <- list(common_features = common, total_a = length(fa), total_b = length(fb))
+                    cat(toJSON(res, auto_unbox = TRUE))
+                ''' % (f1, f2)
+
+                out = self._execute_r_script(r_script, data_files=payload)
+                import json as _json
+                parsed = _json.loads(out.strip())
+                results.update({'common_features': parsed.get('common_features', 0), 'total_features': parsed.get('total_a', 0) + parsed.get('total_b', 0)})
+        except Exception as e:
+            logger.exception('Tissue comparison failed: %s', e)
+
         return results
