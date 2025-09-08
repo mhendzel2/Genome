@@ -2,9 +2,11 @@ streamlit
 requests
 pandas
 gseapy
-cooltools
 scipy
 plotly
 gprofiler-official
 statsmodels
 scikit-learn
+pyvis
+matplotlib
+pycircos

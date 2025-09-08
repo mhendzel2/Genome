@@ -1,0 +1,14 @@
+Metadata-Version: 2.4
+Name: repl-nix-workspace
+Version: 0.1.0
+Summary: Add your description here
+Author: Genomics Analysis Platform
+Requires-Python: >=3.11
+Requires-Dist: numpy>=2.3.0
+Requires-Dist: pandas>=2.3.0
+Requires-Dist: plotly>=6.1.2
+Requires-Dist: psycopg2-binary>=2.9.10
+Requires-Dist: sqlalchemy>=2.0.41
+Requires-Dist: streamlit>=1.45.1
+Dynamic: author
+Dynamic: requires-python
