@@ -73,20 +73,31 @@ class RIntegration:
         if not self._validate_r_script(script):
             raise ValueError("R script contains potentially unsafe content")
         
+        import logging
+        logger = logging.getLogger(__name__)
+
         with tempfile.TemporaryDirectory() as temp_dir:
-            # Write R script to temporary file with safe filename
-            script_path = os.path.join(temp_dir, 'analysis.R')
-            with open(script_path, 'w') as f:
-                f.write(script)
-            
-            # Write data files if provided with validation
+            # Write data files to temporary paths and prepare replacements
+            file_map = {}
             if data_files:
                 for filename, content in data_files.items():
                     safe_filename = self._sanitize_filename(filename)
                     file_path = os.path.join(temp_dir, safe_filename)
-                    with open(file_path, 'w') as f:
+                    with open(file_path, 'w', encoding='utf-8') as f:
                         f.write(content)
-            
+                    file_map[filename] = file_path
+
+            # Allow scripts to reference input files via a simple placeholder syntax {file:<name>}
+            # Replace placeholders in the script with the temp file paths where possible.
+            for original_name, path in file_map.items():
+                placeholder = f"{{file:{original_name}}}"
+                script = script.replace(placeholder, path.replace('\\', '/'))
+
+            # Write R script to temporary file with safe filename
+            script_path = os.path.join(temp_dir, 'analysis.R')
+            with open(script_path, 'w', encoding='utf-8') as f:
+                f.write(script)
+
             # Execute R script with restricted environment
             try:
                 result = subprocess.run(
@@ -97,13 +108,15 @@ class RIntegration:
                     timeout=300,  # 5 minute timeout
                     env={'PATH': os.environ.get('PATH', ''), 'HOME': temp_dir}  # Restricted environment
                 )
-                
+
                 if result.returncode != 0:
+                    logger.error('R script stderr: %s', result.stderr)
                     raise RuntimeError(f"R script execution failed: {result.stderr}")
-                
+
                 return result.stdout
-                
+
             except subprocess.TimeoutExpired:
+                logger.exception('R script execution timed out')
                 raise RuntimeError("R script execution timed out")
     
     def _validate_r_script(self, script: str) -> bool:
@@ -138,62 +151,68 @@ class RIntegration:
         
         for filename, file_info in data_files.items():
             try:
-                # Convert file data to R-compatible format
+                # Prepare file content mapping; support file-like objects
                 if hasattr(file_info['file'], 'getvalue'):
                     file_content = file_info['file'].getvalue()
                 else:
-                    file_info['file'].seek(0)
-                    file_content = file_info['file'].read().decode('utf-8')
-                
-                # Create R script for basic statistics
-                r_script = f'''
-                # Read data
-                data <- read.table(text = "{file_content}", sep = "\\t", header = FALSE, comment.char = "#")
-                
-                # Basic statistics
+                    try:
+                        file_info['file'].seek(0)
+                    except Exception:
+                        pass
+                    raw = file_info['file'].read()
+                    if isinstance(raw, bytes):
+                        file_content = raw.decode('utf-8')
+                    else:
+                        file_content = raw
+
+                data_files_payload = {filename: file_content}
+
+                # Create R script that reads from a file path placeholder
+                r_script = '''
+                library(jsonlite)
+                # Read data from provided file path (placeholder will be replaced)
+                data <- read.table(file = "{file:%s}", sep = "\t", header = FALSE, comment.char = "#")
+
                 stats <- list()
                 stats$total_regions <- nrow(data)
-                
-                # If there's a score column (4th column in BED format)
-                if (ncol(data) >= 4) {{
+
+                if (ncol(data) >= 4) {
                     scores <- as.numeric(data[,4])
                     scores <- scores[!is.na(scores)]
-                    if (length(scores) > 0) {{
+                    if (length(scores) > 0) {
                         stats$mean_score <- mean(scores)
                         stats$median_score <- median(scores)
                         stats$max_score <- max(scores)
                         stats$min_score <- min(scores)
                         stats$sd_score <- sd(scores)
-                    }}
-                }}
-                
-                # If there are coordinates (start, end)
-                if (ncol(data) >= 3) {{
+                    }
+                }
+
+                if (ncol(data) >= 3) {
                     starts <- as.numeric(data[,2])
                     ends <- as.numeric(data[,3])
                     lengths <- ends - starts
                     lengths <- lengths[!is.na(lengths) & lengths > 0]
-                    if (length(lengths) > 0) {{
+                    if (length(lengths) > 0) {
                         stats$mean_length <- mean(lengths)
                         stats$median_length <- median(lengths)
                         stats$max_length <- max(lengths)
                         stats$min_length <- min(lengths)
-                    }}
-                }}
-                
-                # Output as JSON
-                cat(jsonlite::toJSON(stats, auto_unbox = TRUE))
-                '''
-                
-                # Execute R script
-                output = self._execute_r_script(r_script)
-                
+                    }
+                }
+
+                cat(toJSON(stats, auto_unbox = TRUE))
+                ''' % (filename)
+
+                # Execute R script, letting _execute_r_script write the file content to temp
+                output = self._execute_r_script(r_script, data_files=data_files_payload)
+
                 # Parse JSON output
                 try:
-                    import json
-                    stats = json.loads(output.strip())
+                    import json as _json
+                    stats = _json.loads(output.strip())
                     results[filename] = stats
-                except json.JSONDecodeError:
+                except Exception:
                     # Fallback to basic parsing
                     results[filename] = {'total_regions': 'N/A', 'error': 'Could not parse R output'}
                 
