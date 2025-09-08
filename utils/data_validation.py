@@ -29,7 +29,40 @@ class DataValidator:
                 pass
 
             # Pandas can infer compression from filename or by using compression='infer'.
+            # For file-like objects without a filename, try to detect gzip magic bytes.
             read_csv_kwargs = dict(sep='\t', engine='python', compression='infer')
+
+            # If uploaded_file is a bytes buffer without a filename, peek to detect gzip
+            try:
+                has_name = hasattr(uploaded_file, 'name') and isinstance(getattr(uploaded_file, 'name'), str)
+            except Exception:
+                has_name = False
+
+            if not has_name:
+                try:
+                    # Read first two bytes to check for gzip magic number
+                    pos = None
+                    if hasattr(uploaded_file, 'tell') and hasattr(uploaded_file, 'seek'):
+                        try:
+                            pos = uploaded_file.tell()
+                        except Exception:
+                            pos = None
+
+                    first2 = uploaded_file.read(2)
+                    # Ensure we restore pointer
+                    try:
+                        if pos is not None:
+                            uploaded_file.seek(pos)
+                        else:
+                            uploaded_file.seek(0)
+                    except Exception:
+                        pass
+
+                    if isinstance(first2, (bytes, bytearray)) and len(first2) >= 2 and first2[0] == 0x1f and first2[1] == 0x8b:
+                        read_csv_kwargs['compression'] = 'gzip'
+                except Exception:
+                    # If any peek fails, continue and let pandas try to infer
+                    pass
 
             # Choose header and dtype strategy based on file_type
             if file_type in ['Histone Marks', 'ChIP-seq', 'BED']:
@@ -40,18 +73,62 @@ class DataValidator:
                 return df
 
             elif file_type == 'Gene Expression':
-                # Gene expression: try with header, fallback to header=None
+                # Gene expression: attempt a lightweight header detection by peeking first line.
+                header_detected = False
                 try:
-                    read_csv_kwargs['header'] = 0
+                    # Preserve position
+                    pos = None
+                    if hasattr(uploaded_file, 'tell') and hasattr(uploaded_file, 'seek'):
+                        try:
+                            pos = uploaded_file.tell()
+                        except Exception:
+                            pos = None
+
+                    # Peek a chunk safely (works for StringIO and BytesIO)
+                    peek = uploaded_file.read(2048)
+                    if isinstance(peek, (bytes, bytearray)):
+                        try:
+                            peek = peek.decode('utf-8')
+                        except Exception:
+                            peek = ''
+
+                    # Heuristic: if first non-empty line contains non-numeric tokens, treat as header
+                    first_line = ''
+                    if isinstance(peek, str) and peek:
+                        for line in peek.splitlines():
+                            if line.strip():
+                                first_line = line
+                                break
+
+                    if first_line and '\t' in first_line:
+                        tokens = [t for t in first_line.strip().split('\t') if t]
+                        if tokens and any(not t.replace('.', '', 1).isdigit() for t in tokens):
+                            header_detected = True
+
+                    # restore pointer
+                    try:
+                        if pos is not None:
+                            uploaded_file.seek(pos)
+                        else:
+                            uploaded_file.seek(0)
+                    except Exception:
+                        pass
+                except Exception:
+                    header_detected = False
+
+                try:
+                    read_csv_kwargs['header'] = 0 if header_detected else None
                     df = pd.read_csv(uploaded_file, **read_csv_kwargs)
                 except Exception:
+                    # If parsing fails, attempt fallback without header
                     try:
                         uploaded_file.seek(0)
                     except Exception:
                         pass
                     read_csv_kwargs['header'] = None
                     df = pd.read_csv(uploaded_file, **read_csv_kwargs)
-                logger.debug("Loaded gene expression file: %s columns", df.shape[1])
+
+                logger.debug("Loaded gene expression file: %s columns (header_detected=%s)", df.shape[1], header_detected)
                 return df
 
             else:
