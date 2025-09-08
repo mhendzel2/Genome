@@ -61,7 +61,14 @@ class DatabaseManager:
     def __init__(self):
         self.database_url = os.getenv('DATABASE_URL')
         if not self.database_url:
-            raise ValueError("DATABASE_URL environment variable not found")
+            # Fallback to a local sqlite database for development if DATABASE_URL not provided
+            sqlite_path = os.getenv('DEV_SQLITE_PATH', 'genome_local.db')
+            if sqlite_path == ':memory:':
+                self.database_url = 'sqlite:///:memory:'
+            else:
+                abs_path = os.path.abspath(sqlite_path)
+                self.database_url = f'sqlite:///{abs_path}'
+            print(f"DATABASE_URL not set, using sqlite fallback: {self.database_url}")
         
         self.engine = create_engine(self.database_url)
         self.SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=self.engine)

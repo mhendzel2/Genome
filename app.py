@@ -2,7 +2,7 @@ import streamlit as st
 from utils.dataset_discovery import DatasetDiscovery
 from utils.depmap_client import DepMapClient
 from utils.visualization import GenomicsVisualizer
-from analysis.analyzer import GenomicsAnalyzer
+from analysis.analyzer_adapter import AnalyzerAdapter
 from utils.r_integration import RIntegration
 import pandas as pd
 import numpy as np
@@ -205,7 +205,7 @@ def main():
     depmap_client = DepMapClient()
     visualizer = GenomicsVisualizer()
     r_integration = RIntegration()
-    analyzer = GenomicsAnalyzer(r_integration)
+    analyzer = AnalyzerAdapter(r_integration)
     
     page = st.sidebar.selectbox(
         "Choose a section",

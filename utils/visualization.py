@@ -13,17 +13,33 @@ class GenomicsVisualizer:
 
     def create_enrichment_bar_chart(self, df: pd.DataFrame, top_n: int = 20) -> go.Figure:
         """Creates a bar chart for enrichment analysis results from g:Profiler."""
-        if 'p_value' not in df.columns or 'name' not in df.columns:
-            return go.Figure().update_layout(title_text="Enrichment data is missing 'p_value' or 'name' columns.")
+        # Support multiple possible p-value column names
+        pval_cols = [c for c in df.columns if c.lower() in ('p_value', 'pvalue', 'p_val', 'pval')]
+        name_cols = [c for c in df.columns if c.lower() in ('name', 'term', 'description')]
+
+        if not pval_cols or not name_cols:
+            return go.Figure().update_layout(title_text="Enrichment data missing p-value or name/term columns.")
+
+        pcol = pval_cols[0]
+        ncol = name_cols[0]
+
+        # Work on a copy to avoid mutating the caller's DataFrame
+        df_copy = df.copy()
+
+        # Coerce p-values to numeric and drop rows with invalid p-values
+        df_copy[pcol] = pd.to_numeric(df_copy[pcol], errors='coerce')
+        df_copy = df_copy.dropna(subset=[pcol, ncol])
+        if df_copy.empty:
+            return go.Figure().update_layout(title_text="No valid enrichment results to plot.")
 
         # Calculate -log10(p-value) for the score
-        df['Combined Score'] = -np.log10(df['p_value'])
+        df_copy['combined_score'] = -np.log10(df_copy[pcol].clip(lower=1e-300))
 
-        df_sorted = df.sort_values(by='Combined Score', ascending=True).tail(top_n)
+        df_sorted = df_copy.sort_values(by='combined_score', ascending=True).tail(top_n)
 
-        fig = px.bar(df_sorted, x='Combined Score', y='name', orientation='h',
-                     title=f"Top {top_n} Enriched Pathways",
-                     labels={'Combined Score': '-log10(p-value)', 'name': 'Term'})
+        fig = px.bar(df_sorted, x='combined_score', y=ncol, orientation='h',
+                     title=f"Top {top_n} Enriched Terms",
+                     labels={'combined_score': '-log10(p-value)', ncol: 'Term'})
         fig.update_layout(yaxis_title="Enriched Term")
         return fig
 

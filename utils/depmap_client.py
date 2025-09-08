@@ -16,12 +16,14 @@ class DepMapClient:
         :param release_id: The Figshare article ID for the release.
         :return: A list of dictionaries, where each dictionary represents a file.
         """
+        import logging
+        logger = logging.getLogger(__name__)
         try:
             response = requests.get(f"{self.figshare_api_base}/articles/{release_id}/files")
             response.raise_for_status()
             return response.json()
         except requests.exceptions.RequestException as e:
-            print(f"Error fetching file list from Figshare: {e}")
+            logger.exception("Error fetching file list from Figshare: %s", e)
             return []
 
     def download_file(self, download_url: str, local_filename: str) -> bool:
@@ -32,6 +34,8 @@ class DepMapClient:
         :param local_filename: The local path to save the file to.
         :return: True if the download was successful, False otherwise.
         """
+        import logging
+        logger = logging.getLogger(__name__)
         try:
             with requests.get(download_url, stream=True) as r:
                 r.raise_for_status()
@@ -40,5 +44,5 @@ class DepMapClient:
                         f.write(chunk)
             return True
         except requests.exceptions.RequestException as e:
-            print(f"Error downloading file: {e}")
+            logger.exception("Error downloading file: %s", e)
             return False
