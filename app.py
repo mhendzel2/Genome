@@ -91,9 +91,16 @@ def analysis_page(analyzer):
                 if control_files and treatment_files:
                     with st.spinner("Running Differential Expression Analysis..."):
                         st.session_state['uploaded_data'] = {'control': control_files, 'treatment': treatment_files}
-                        st.session_state['analysis_results'] = analyzer.differential_expression(
+                        result = analyzer.differential_expression(
                             st.session_state['uploaded_data']
                         )
+                        
+                        # Extract actual result from adapter wrapper
+                        if isinstance(result, dict) and 'result' in result:
+                            st.session_state['analysis_results'] = result['result']
+                        else:
+                            st.session_state['analysis_results'] = result
+                        
                         st.success("Analysis complete!")
                         st.write(st.session_state['analysis_results'])
                 else:
@@ -111,8 +118,18 @@ def analysis_page(analyzer):
                         wrapped_files = {
                             f.name: {'file': f, 'type': file_type} for f in uploaded_files
                         }
-                        results = analyzer.quality_control(wrapped_files)
-                        st.session_state['analysis_results'] = pd.DataFrame.from_dict(results, orient='index')
+                        result = analyzer.quality_control(wrapped_files)
+                        
+                        # Extract actual result from adapter wrapper
+                        if isinstance(result, dict) and 'result' in result:
+                            qc_results = result['result']
+                        else:
+                            qc_results = result
+                        
+                        if isinstance(qc_results, dict):
+                            st.session_state['analysis_results'] = pd.DataFrame.from_dict(qc_results, orient='index')
+                        else:
+                            st.session_state['analysis_results'] = qc_results
                         st.success("QC complete!")
                         st.write(st.session_state['analysis_results'])
                 else:
@@ -125,7 +142,7 @@ def analysis_page(analyzer):
                     with st.spinner(f"Running {analysis_type}..."):
                         st.session_state['uploaded_data'] = [uploaded_file]
                         if analysis_type == "Basic Statistics":
-                            st.session_state['analysis_results'] = analyzer.basic_statistics(
+                            result = analyzer.basic_statistics(
                                 {uploaded_file.name: {'file': uploaded_file, 'type': 'BED'}}
                             )
                         elif analysis_type == "Enrichment Analysis":
@@ -135,7 +152,14 @@ def analysis_page(analyzer):
                                     'type': 'Gene Expression'
                                 }
                             }
-                            st.session_state['analysis_results'] = analyzer.enrichment_analysis(wrapped_file)
+                            result = analyzer.enrichment_analysis(wrapped_file)
+                        
+                        # Extract actual result from adapter wrapper
+                        if isinstance(result, dict) and 'result' in result:
+                            st.session_state['analysis_results'] = result['result']
+                        else:
+                            st.session_state['analysis_results'] = result
+                    
                     st.success("Analysis complete!")
                     st.write(st.session_state['analysis_results'])
 

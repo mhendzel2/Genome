@@ -8,3 +8,10 @@ plotly
 gprofiler-official
 statsmodels
 scikit-learn
+numpy
+seaborn
+biopython
+xmltodict
+lxml
+psycopg2-binary
+sqlalchemy
