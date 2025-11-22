@@ -6,6 +6,15 @@ import os
 from utils.gprofiler_client import GProfilerClient
 from statsmodels.stats.multitest import fdrcorrection
 
+# Try to import cooler for Hi-C analysis
+try:
+    import cooler
+    import cooltools
+    import cooltools.lib.numutils
+except ImportError:
+    cooler = None
+    cooltools = None
+
 class GenomicsAnalyzer:
     """Main genomics analysis coordinator"""
     
@@ -16,7 +25,9 @@ class GenomicsAnalyzer:
             'peak_calling', 
             'differential_expression',
             'tissue_comparison',
-            'enrichment_analysis'
+            'enrichment_analysis',
+            'chromatin_interaction_analysis',
+            'ai_interpretation'
         ]
     
     def basic_statistics(self, uploaded_files: Dict[str, Any]) -> Dict[str, Any]:
@@ -119,51 +130,64 @@ class GenomicsAnalyzer:
             return pd.DataFrame()
     
     def chromatin_interaction_analysis(self, uploaded_files: Dict[str, Any], **params) -> Dict[str, Any]:
-        """Analyze chromatin interaction data (Hi-C)"""
+        """Analyze chromatin interaction data (Hi-C) using cooler"""
         if not uploaded_files:
             return {}
         
-        # Filter for Hi-C files
+        # Filter for Hi-C files (.cool or .mcool)
         hic_files = {
             filename: file_info 
             for filename, file_info in uploaded_files.items()
-            if file_info['type'] == 'HiC'
+            if file_info['type'] == 'HiC' or filename.endswith('.cool') or filename.endswith('.mcool')
         }
         
         if not hic_files:
-            return {'error': 'No Hi-C data found'}
+            return {'error': 'No Hi-C data found (expecting .cool files)'}
         
-        # Mock Hi-C analysis results
-        results = {
-            'total_interactions': 0,
-            'significant_interactions': 0,
-            'interaction_distance_stats': {},
-            'compartment_analysis': {},
-            'tad_boundaries': []
-        }
+        if not cooler:
+            return {'error': 'cooler library not installed'}
+
+        results = {}
         
         for filename, file_info in hic_files.items():
             try:
-                # Read file and count interactions
-                file_info['file'].seek(0)
-                content = file_info['file'].read().decode('utf-8')
-                lines = [line for line in content.split('\n') 
-                        if line.strip() and not line.startswith('#')]
+                # Cooler requires a file path, write to temp
+                with tempfile.NamedTemporaryFile(suffix='.cool', delete=False) as tmp:
+                    file_info['file'].seek(0)
+                    tmp.write(file_info['file'].read())
+                    tmp_path = tmp.name
                 
-                interactions = len(lines)
-                significant = int(interactions * 0.1)  # 10% significant
-                
-                results['total_interactions'] += interactions
-                results['significant_interactions'] += significant
-                
-                # Mock distance analysis
-                distances = np.random.lognormal(mean=5, sigma=1, size=interactions)
-                results['interaction_distance_stats'] = {
-                    'mean_distance': np.mean(distances),
-                    'median_distance': np.median(distances),
-                    'max_distance': np.max(distances),
-                    'min_distance': np.min(distances)
-                }
+                try:
+                    clr = cooler.Cooler(tmp_path)
+
+                    # Basic stats
+                    n_interactions = clr.info['sum']
+                    n_bins = clr.info['nbins']
+                    chromosomes = clr.chromnames
+
+                    # Calculate simple stats on pixels (sparse matrix)
+                    pixels = clr.pixels()[:]
+                    mean_counts = pixels['count'].mean()
+                    max_counts = pixels['count'].max()
+
+                    # Insulation score (TAD boundaries approximation) using cooltools if available
+                    tad_info = "Insulation score calculation skipped (cooltools not fully configured)"
+                    if cooltools:
+                         # Simplified: just mention availability
+                         tad_info = "Cooltools available for TAD analysis"
+
+                    results[filename] = {
+                        'total_interactions': int(n_interactions),
+                        'number_of_bins': int(n_bins),
+                        'chromosomes': chromosomes,
+                        'mean_interactions_per_bin': float(mean_counts),
+                        'max_interactions': int(max_counts),
+                        'tad_analysis': tad_info
+                    }
+
+                finally:
+                    if os.path.exists(tmp_path):
+                        os.remove(tmp_path)
                 
             except Exception as e:
                 results[f'error_{filename}'] = str(e)
@@ -218,28 +242,33 @@ class GenomicsAnalyzer:
         
         for filename, file_info in uploaded_files.items():
             try:
-                file_info['file'].seek(0)
-                content = file_info['file'].read().decode('utf-8')
-                lines = content.split('\n')
+                # Reset pointer
+                try:
+                    file_info['file'].seek(0)
+                except Exception:
+                    pass
+
+                # Read first chunk for QC to avoid memory issues
+                content_chunk = file_info['file'].read(10000)
+                if isinstance(content_chunk, bytes):
+                    content_chunk = content_chunk.decode('utf-8', errors='ignore')
+
+                lines = content_chunk.split('\n')
                 
-                # Basic QC metrics
+                # Basic QC metrics (estimated from chunk)
                 total_lines = len(lines)
                 data_lines = len([l for l in lines if l.strip() and not l.startswith('#')])
-                empty_lines = total_lines - data_lines
                 
-                # Format-specific QC
                 qc_metrics = {
-                    'total_lines': total_lines,
-                    'data_lines': data_lines,
-                    'empty_lines': empty_lines,
-                    'file_size_kb': len(content) / 1024,
+                    'preview_lines': total_lines,
+                    'preview_data_lines': data_lines,
                     'quality_score': 'PASS' if data_lines > 0 else 'FAIL'
                 }
                 
                 # Add data type-specific QC
                 data_type = file_info['type']
                 
-                if data_type in ['ChIP-seq', 'Histone Marks']:
+                if data_type in ['ChIP-seq', 'Histone Marks', 'BED']:
                     # Check for proper BED format
                     bed_format_ok = True
                     invalid_coords = 0
@@ -261,7 +290,6 @@ class GenomicsAnalyzer:
                     qc_metrics.update({
                         'bed_format_valid': bed_format_ok,
                         'invalid_coordinates': invalid_coords,
-                        'coordinate_error_rate': invalid_coords / min(100, data_lines) if data_lines > 0 else 0
                     })
                 
                 elif data_type == 'Gene Expression':
@@ -276,7 +304,6 @@ class GenomicsAnalyzer:
                     qc_metrics.update({
                         'consistent_columns': consistent_columns,
                         'column_count': max(column_counts) if column_counts else 0,
-                        'numeric_values_check': 'PASS'  # Would implement actual numeric check
                     })
                 
                 qc_results[filename] = qc_metrics
@@ -286,13 +313,72 @@ class GenomicsAnalyzer:
         
         return qc_results
     
-    def generate_analysis_report(self, analysis_results: Dict[str, Any]) -> str:
+    def generate_ai_interpretation(self, enrichment_results: pd.DataFrame, tissue: str = "Unknown") -> str:
+        """
+        Generate an AI-driven interpretation of enrichment results using LLM (RAG).
+
+        Args:
+            enrichment_results: DataFrame from enrichment analysis.
+            tissue: Tissue type for context.
+
+        Returns:
+            String containing the AI interpretation.
+        """
+        if enrichment_results.empty:
+            return "No significant pathways found to interpret."
+
+        # Extract top pathways
+        if 'name' in enrichment_results.columns:
+            pathways = enrichment_results['name'].head(10).tolist()
+        elif 'term_name' in enrichment_results.columns:
+            pathways = enrichment_results['term_name'].head(10).tolist()
+        else:
+            return "Could not identify pathway names in results."
+
+        pathway_list_str = ", ".join(pathways)
+
+        # Construct Prompt
+        prompt = f"""
+        You are a helpful assistant for genomic data analysis.
+        Given these significant pathways: [{pathway_list_str}] found in a {tissue} sample,
+        summarize potentially biological implications citing recent literature (2024-2025 context).
+        Focus on clinical relevance and mechanism.
+        """
+
+        # Mock LLM Call (Placeholder for GPT-4o / BioMistral API)
+        # In a real implementation, we would call:
+        # response = requests.post(LLM_API_URL, json={"prompt": prompt})
+
+        interpretation = f"""
+        ### AI Interpretation (GeneChat)
+
+        **Context:** {tissue} Tissue Analysis
+        **Top Pathways:** {pathway_list_str}
+
+        **Biological Implications:**
+        Based on the identified pathways, the sample shows strong enrichment in processes related to cellular signaling and metabolism.
+        Recent literature suggests these pathways are critical in {tissue} homeostasis and disease progression.
+
+        *Note: This is a generated interpretation based on pathway names. For clinical decisions, verify with targeted assays.*
+
+        (This feature is currently running in mock mode. Integrate an LLM API key to enable full RAG capabilities.)
+        """
+
+        return interpretation
+
+    def generate_analysis_report(self, analysis_results: Dict[str, Any], ai_interpretation: Optional[str] = None) -> str:
         """Generate a comprehensive analysis report"""
         report_lines = []
         report_lines.append("# Genomics Analysis Report")
         report_lines.append(f"Generated on: {pd.Timestamp.now().strftime('%Y-%m-%d %H:%M:%S')}")
         report_lines.append("")
         
+        if ai_interpretation:
+            report_lines.append(ai_interpretation)
+            report_lines.append("")
+            report_lines.append("---")
+            report_lines.append("")
+
         for analysis_type, results in analysis_results.items():
             report_lines.append(f"## {analysis_type.replace('_', ' ').title()}")
             

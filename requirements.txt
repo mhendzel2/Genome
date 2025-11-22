@@ -15,3 +15,7 @@ xmltodict
 lxml
 psycopg2-binary
 sqlalchemy
+scanpy
+pysam
+cooler
+squidpy
