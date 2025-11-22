@@ -58,18 +58,24 @@ def test_basic_statistics_fallback_json_parsing(monkeypatch):
     ri.r_available = True
 
     # Mock _execute_r_script to return JSON
-    def fake_exec(script, data_files=None):
+    def fake_exec(script, data_files=None, args_files=None, extra_args=None):
         return json.dumps({'total_regions': 2, 'mean_length': 100})
 
     monkeypatch.setattr(ri, '_execute_r_script', fake_exec)
 
     fake_file = SimpleNamespace()
-    fake_file.getvalue = lambda: 'chr1\t100\t200\nchr1\t300\t400\n'
+    fake_file.read = lambda: b'chr1\t100\t200\nchr1\t300\t400\n'
+    fake_file.seek = lambda x: None
 
     data_files = {'test.bed': {'file': fake_file}}
 
     res = ri.basic_statistics(data_files)
     assert 'test.bed' in res
+
+    # If there was an error, print it
+    if 'error' in res['test.bed']:
+        pytest.fail(f"Basic statistics failed with error: {res['test.bed']['error']}")
+
     assert res['test.bed']['total_regions'] == 2
 
 
@@ -78,7 +84,7 @@ def test_peak_calling_parses_json_and_attaches_metadata(monkeypatch):
     ri.r_available = True
 
     # Make _execute_r_script return a JSON array
-    def fake_exec(script, data_files=None):
+    def fake_exec(script, data_files=None, args_files=None, extra_args=None):
         return json.dumps([{'chr': 'chr1', 'start': 100, 'end': 200, 'score': 10}])
 
     monkeypatch.setattr(ri, '_execute_r_script', fake_exec)
@@ -89,5 +95,6 @@ def test_peak_calling_parses_json_and_attaches_metadata(monkeypatch):
 
     peaks = ri.peak_calling(data_files)
     assert isinstance(peaks, list)
+    assert len(peaks) > 0
     assert peaks[0]['file'] == 'chip_sample.bed'
     assert peaks[0]['length'] == 100

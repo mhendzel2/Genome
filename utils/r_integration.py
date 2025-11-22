@@ -4,6 +4,7 @@ import tempfile
 import json
 from typing import Dict, Any, List, Optional
 import pandas as pd
+import logging
 
 class RIntegration:
     """Handles R integration for genomics analysis"""
@@ -65,19 +66,27 @@ class RIntegration:
         except Exception as e:
             print(f"Warning: Could not install R packages: {e}")
     
-    def _execute_r_script(self, script: str, data_files: Optional[Dict[str, str]] = None) -> str:
-        """Execute R script safely with input validation"""
+    def _execute_r_script(self, script: str, data_files: Optional[Dict[str, str]] = None,
+                         args_files: Optional[List[str]] = None, extra_args: Optional[List[str]] = None) -> str:
+        """
+        Execute R script safely with input validation.
+
+        Args:
+            script: The R script content.
+            data_files: Dictionary mapping filenames to content (string).
+            args_files: List of keys in data_files whose temporary paths should be passed as arguments.
+            extra_args: List of additional string arguments to pass to the script.
+        """
         if not self.r_available:
             raise RuntimeError("R is not available on this system")
         
         if not self._validate_r_script(script):
             raise ValueError("R script contains potentially unsafe content")
         
-        import logging
         logger = logging.getLogger(__name__)
 
         with tempfile.TemporaryDirectory() as temp_dir:
-            # Write data files to temporary paths and prepare replacements
+            # Write data files to temporary paths
             file_map = {}
             if data_files:
                 for filename, content in data_files.items():
@@ -88,7 +97,7 @@ class RIntegration:
                     file_map[filename] = file_path
 
             # Allow scripts to reference input files via a simple placeholder syntax {file:<name>}
-            # Replace placeholders in the script with the temp file paths where possible.
+            # (Deprecated but kept for backward compatibility if needed, though we prefer args now)
             for original_name, path in file_map.items():
                 placeholder = f"{{file:{original_name}}}"
                 script = script.replace(placeholder, path.replace('\\', '/'))
@@ -98,10 +107,25 @@ class RIntegration:
             with open(script_path, 'w', encoding='utf-8') as f:
                 f.write(script)
 
+            # Construct command line arguments
+            cmd_args = []
+            if args_files:
+                for key in args_files:
+                    if key in file_map:
+                        cmd_args.append(file_map[key])
+                    else:
+                        logger.warning(f"File key '{key}' not found in data_files map")
+
+            if extra_args:
+                cmd_args.extend([str(arg) for arg in extra_args])
+
             # Execute R script with restricted environment
+            # Uses 'Rscript' to easily pass arguments
             try:
+                cmd = ['Rscript', '--vanilla', script_path] + cmd_args
+
                 result = subprocess.run(
-                    ['R', '--vanilla', '--slave', '-f', script_path],
+                    cmd,
                     cwd=temp_dir,
                     capture_output=True,
                     text=True,
@@ -144,34 +168,22 @@ class RIntegration:
     def basic_statistics(self, data_files: Dict[str, Any]) -> Dict[str, Any]:
         """Compute basic statistics using R"""
         if not self.r_available:
-            # Fallback to Python-based statistics
             return self._python_basic_statistics(data_files)
         
         results = {}
         
         for filename, file_info in data_files.items():
             try:
-                # Prepare file content mapping; support file-like objects
-                if hasattr(file_info['file'], 'getvalue'):
-                    file_content = file_info['file'].getvalue()
-                else:
-                    try:
-                        file_info['file'].seek(0)
-                    except Exception:
-                        pass
-                    raw = file_info['file'].read()
-                    if isinstance(raw, bytes):
-                        file_content = raw.decode('utf-8')
-                    else:
-                        file_content = raw
+                # Get content
+                content = self._get_file_content(file_info)
 
-                data_files_payload = {filename: file_content}
-
-                # Create R script that reads from a file path placeholder
                 r_script = '''
                 library(jsonlite)
-                # Read data from provided file path (placeholder will be replaced)
-                data <- read.table(file = "{file:%s}", sep = "\t", header = FALSE, comment.char = "#")
+                args <- commandArgs(trailingOnly = TRUE)
+                input_file <- args[1]
+
+                # Read data from provided file path
+                data <- read.table(file = input_file, sep = "\t", header = FALSE, comment.char = "#")
 
                 stats <- list()
                 stats$total_regions <- nrow(data)
@@ -202,18 +214,18 @@ class RIntegration:
                 }
 
                 cat(toJSON(stats, auto_unbox = TRUE))
-                ''' % (filename)
+                '''
 
-                # Execute R script, letting _execute_r_script write the file content to temp
-                output = self._execute_r_script(r_script, data_files=data_files_payload)
+                output = self._execute_r_script(
+                    r_script,
+                    data_files={filename: content},
+                    args_files=[filename]
+                )
 
-                # Parse JSON output
                 try:
-                    import json as _json
-                    stats = _json.loads(output.strip())
+                    stats = json.loads(output.strip())
                     results[filename] = stats
                 except Exception:
-                    # Fallback to basic parsing
                     results[filename] = {'total_regions': 'N/A', 'error': 'Could not parse R output'}
                 
             except Exception as e:
@@ -221,6 +233,170 @@ class RIntegration:
         
         return results
     
+    def peak_calling(self, data_files: Dict[str, Any], **params) -> List[Dict[str, Any]]:
+        """Perform peak calling analysis"""
+        if not self.r_available:
+            return self._python_peak_calling(data_files, **params)
+
+        logger = logging.getLogger(__name__)
+        results = []
+        threshold = float(params.get('fold_change', 2.0))
+
+        for filename, file_info in data_files.items():
+            if 'chip' in filename.lower() or file_info.get('type') == 'ChIP-seq':
+                try:
+                    content = self._get_file_content(file_info)
+
+                    r_script = '''
+                    library(jsonlite)
+                    args <- commandArgs(trailingOnly = TRUE)
+                    input_file <- args[1]
+                    threshold <- as.numeric(args[2])
+
+                    dat <- read.table(file = input_file, sep = "\t", header = FALSE, comment.char = "#")
+                    peaks <- list()
+                    if (ncol(dat) >= 4) {
+                        # Limit to first 100 for example
+                        for (i in seq_len(min(nrow(dat), 100))) {
+                            row <- dat[i, ]
+                            score <- as.numeric(row[[4]])
+                            if (!is.na(score) && score > threshold) {
+                                peaks[[length(peaks) + 1]] <- list(
+                                    chr = as.character(row[[1]]),
+                                    start = as.integer(row[[2]]),
+                                    end = as.integer(row[[3]]),
+                                    score = score
+                                )
+                            }
+                        }
+                    }
+                    cat(toJSON(peaks, auto_unbox = TRUE))
+                    '''
+
+                    output = self._execute_r_script(
+                        r_script,
+                        data_files={filename: content},
+                        args_files=[filename],
+                        extra_args=[str(threshold)]
+                    )
+
+                    parsed = json.loads(output.strip()) if output and output.strip() else []
+                    for p in parsed:
+                        p['file'] = filename
+                        if 'length' not in p and 'start' in p and 'end' in p:
+                            p['length'] = p.get('end', 0) - p.get('start', 0)
+                        results.append(p)
+                except Exception as e:
+                    logger.exception('Error calling peaks for %s: %s', filename, e)
+
+        return results
+
+    def differential_expression(self, data_files: Dict[str, Any], **params) -> Dict[str, Any]:
+        """Perform differential expression analysis"""
+        if not self.r_available:
+            return self._python_basic_statistics(data_files) # Fallback doesn't really do DE, but returns stats
+
+        logger = logging.getLogger(__name__)
+        stats = {'upregulated': 0, 'downregulated': 0, 'total_genes': 0, 'significant_genes': 0}
+
+        for filename, file_info in data_files.items():
+            if 'expression' in filename.lower() or file_info.get('type') == 'Gene Expression':
+                try:
+                    content = self._get_file_content(file_info)
+
+                    r_script = '''
+                    library(jsonlite)
+                    args <- commandArgs(trailingOnly = TRUE)
+                    input_file <- args[1]
+
+                    dat <- read.table(file = input_file, sep = "\t", header = TRUE, comment.char = "#", stringsAsFactors = FALSE)
+                    res <- list()
+                    res$total_genes <- nrow(dat)
+                    if ('log2FoldChange' %in% colnames(dat)) {
+                        up <- sum(dat$log2FoldChange > 0, na.rm = TRUE)
+                        down <- sum(dat$log2FoldChange < 0, na.rm = TRUE)
+                        res$upregulated <- up
+                        res$downregulated <- down
+                        res$significant_genes <- up + down
+                    } else {
+                        res$upregulated <- 0
+                        res$downregulated <- 0
+                        res$significant_genes <- 0
+                    }
+                    cat(toJSON(res, auto_unbox = TRUE))
+                    '''
+
+                    output = self._execute_r_script(
+                        r_script,
+                        data_files={filename: content},
+                        args_files=[filename]
+                    )
+
+                    parsed = json.loads(output.strip())
+                    stats.update(parsed)
+                except Exception as e:
+                    logger.exception('DE failed for %s: %s', filename, e)
+
+        return stats
+
+    def tissue_comparison(self, tissues: List[str], comparison_type: str, data_files: Dict[str, Any]) -> Dict[str, Any]:
+        """Perform tissue comparison analysis"""
+        logger = logging.getLogger(__name__)
+        results = {'tissues_compared': tissues, 'comparison_type': comparison_type, 'common_features': 0, 'unique_tissue1': 0, 'unique_tissue2': 0, 'total_features': 0}
+
+        try:
+            payload = {}
+            for filename, file_info in data_files.items():
+                try:
+                    content = self._get_file_content(file_info)
+                    payload[filename] = content
+                except Exception as e:
+                    logger.exception('Could not read %s: %s', filename, e)
+
+            if len(payload) >= 2:
+                names = list(payload.keys())
+                f1 = names[0]
+                f2 = names[1]
+
+                r_script = '''
+                    library(jsonlite)
+                    args <- commandArgs(trailingOnly = TRUE)
+                    file1 <- args[1]
+                    file2 <- args[2]
+
+                    a <- read.table(file = file1, sep = "\t", header = FALSE, comment.char = "#")
+                    b <- read.table(file = file2, sep = "\t", header = FALSE, comment.char = "#")
+                    fa <- apply(a[,1:3], 1, function(x) paste0(x[1], ':', x[2], '-', x[3]))
+                    fb <- apply(b[,1:3], 1, function(x) paste0(x[1], ':', x[2], '-', x[3]))
+                    common <- length(intersect(fa, fb))
+                    res <- list(common_features = common, total_a = length(fa), total_b = length(fb))
+                    cat(toJSON(res, auto_unbox = TRUE))
+                '''
+
+                output = self._execute_r_script(
+                    r_script,
+                    data_files=payload,
+                    args_files=[f1, f2]
+                )
+
+                parsed = json.loads(output.strip())
+                results.update({'common_features': parsed.get('common_features', 0), 'total_features': parsed.get('total_a', 0) + parsed.get('total_b', 0)})
+        except Exception as e:
+            logger.exception('Tissue comparison failed: %s', e)
+
+        return results
+
+    def _get_file_content(self, file_info):
+        """Helper to extract content string from file info"""
+        try:
+            file_info['file'].seek(0)
+        except Exception:
+            pass
+        raw = file_info['file'].read()
+        if isinstance(raw, bytes):
+            return raw.decode('utf-8')
+        return raw
+
     def _python_basic_statistics(self, data_files: Dict[str, Any]) -> Dict[str, Any]:
         """Fallback Python-based basic statistics"""
         results = {}
@@ -282,59 +458,7 @@ class RIntegration:
                 results[filename] = {'error': f'Analysis failed: {str(e)}'}
         
         return results
-    
-    def peak_calling(self, data_files: Dict[str, Any], **params) -> List[Dict[str, Any]]:
-        """Perform peak calling analysis"""
-        if not self.r_available:
-            return self._python_peak_calling(data_files, **params)
 
-        import logging
-        logger = logging.getLogger(__name__)
-
-        results = []
-        threshold = float(params.get('fold_change', 2.0))
-
-        for filename, file_info in data_files.items():
-            if 'chip' in filename.lower() or file_info.get('type') == 'ChIP-seq':
-                try:
-                    try:
-                        file_info['file'].seek(0)
-                    except Exception:
-                        pass
-                    raw = file_info['file'].read()
-                    content = raw.decode('utf-8') if isinstance(raw, bytes) else raw
-
-                    payload = {filename: content}
-
-                    r_script = '''
-                    library(jsonlite)
-                    dat <- read.table(file = "{file:%s}", sep = "\t", header = FALSE, comment.char = "#")
-                    peaks <- list()
-                    if (ncol(dat) >= 4) {
-                        for (i in seq_len(min(nrow(dat), 100))) {
-                            row <- dat[i, ]
-                            score <- as.numeric(row[[4]])
-                            if (!is.na(score) && score > %f) {
-                                peaks[[length(peaks) + 1]] <- list(chr = as.character(row[[1]]), start = as.integer(row[[2]]), end = as.integer(row[[3]]), score = score)
-                            }
-                        }
-                    }
-                    cat(toJSON(peaks, auto_unbox = TRUE))
-                    ''' % (filename, threshold)
-
-                    out = self._execute_r_script(r_script, data_files=payload)
-                    import json as _json
-                    parsed = _json.loads(out.strip()) if out and out.strip() else []
-                    for p in parsed:
-                        p['file'] = filename
-                        if 'length' not in p and 'start' in p and 'end' in p:
-                            p['length'] = p.get('end', 0) - p.get('start', 0)
-                        results.append(p)
-                except Exception as e:
-                    logger.exception('Error calling peaks for %s: %s', filename, e)
-
-        return results
-    
     def _python_peak_calling(self, data_files: Dict[str, Any], **params) -> List[Dict[str, Any]]:
         """Python fallback for peak calling"""
         peaks = []
@@ -372,96 +496,3 @@ class RIntegration:
                 print(f"Error in peak calling for {filename}: {e}")
         
         return peaks
-    
-    def differential_expression(self, data_files: Dict[str, Any], **params) -> Dict[str, Any]:
-        """Perform differential expression analysis"""
-        import logging
-        logger = logging.getLogger(__name__)
-
-        if not self.r_available:
-            return self._python_basic_statistics(data_files)
-
-        stats = {'upregulated': 0, 'downregulated': 0, 'total_genes': 0, 'significant_genes': 0}
-        for filename, file_info in data_files.items():
-            if 'expression' in filename.lower() or file_info.get('type') == 'Gene Expression':
-                try:
-                    try:
-                        file_info['file'].seek(0)
-                    except Exception:
-                        pass
-                    raw = file_info['file'].read()
-                    content = raw.decode('utf-8') if isinstance(raw, bytes) else raw
-
-                    payload = {filename: content}
-                    r_script = '''
-                    library(jsonlite)
-                    dat <- read.table(file = "{file:%s}", sep = "\t", header = TRUE, comment.char = "#", stringsAsFactors = FALSE)
-                    res <- list()
-                    res$total_genes <- nrow(dat)
-                    if ('log2FoldChange' %%in%% colnames(dat)) {
-                        up <- sum(dat$log2FoldChange > 0, na.rm = TRUE)
-                        down <- sum(dat$log2FoldChange < 0, na.rm = TRUE)
-                        res$upregulated <- up
-                        res$downregulated <- down
-                        res$significant_genes <- up + down
-                    } else {
-                        res$upregulated <- 0
-                        res$downregulated <- 0
-                        res$significant_genes <- 0
-                    }
-                    cat(toJSON(res, auto_unbox = TRUE))
-                    ''' % (filename)
-
-                    out = self._execute_r_script(r_script, data_files=payload)
-                    import json as _json
-                    parsed = _json.loads(out.strip())
-                    stats.update(parsed)
-                except Exception as e:
-                    logger.exception('DE failed for %s: %s', filename, e)
-
-        return stats
-    
-    def tissue_comparison(self, tissues: List[str], comparison_type: str, data_files: Dict[str, Any]) -> Dict[str, Any]:
-        """Perform tissue comparison analysis"""
-        import logging
-        logger = logging.getLogger(__name__)
-
-        results = {'tissues_compared': tissues, 'comparison_type': comparison_type, 'common_features': 0, 'unique_tissue1': 0, 'unique_tissue2': 0, 'total_features': 0}
-
-        try:
-            payload = {}
-            for filename, file_info in data_files.items():
-                try:
-                    try:
-                        file_info['file'].seek(0)
-                    except Exception:
-                        pass
-                    raw = file_info['file'].read()
-                    content = raw.decode('utf-8') if isinstance(raw, bytes) else raw
-                    payload[filename] = content
-                except Exception as e:
-                    logger.exception('Could not read %s: %s', filename, e)
-
-            if len(payload) >= 2:
-                names = list(payload.keys())
-                f1 = names[0]
-                f2 = names[1]
-                r_script = '''
-                    library(jsonlite)
-                    a <- read.table(file = "{file:%s}", sep = "\t", header = FALSE, comment.char = "#")
-                    b <- read.table(file = "{file:%s}", sep = "\t", header = FALSE, comment.char = "#")
-                    fa <- apply(a[,1:3], 1, function(x) paste0(x[1], ':', x[2], '-', x[3]))
-                    fb <- apply(b[,1:3], 1, function(x) paste0(x[1], ':', x[2], '-', x[3]))
-                    common <- length(intersect(fa, fb))
-                    res <- list(common_features = common, total_a = length(fa), total_b = length(fb))
-                    cat(toJSON(res, auto_unbox = TRUE))
-                ''' % (f1, f2)
-
-                out = self._execute_r_script(r_script, data_files=payload)
-                import json as _json
-                parsed = _json.loads(out.strip())
-                results.update({'common_features': parsed.get('common_features', 0), 'total_features': parsed.get('total_a', 0) + parsed.get('total_b', 0)})
-        except Exception as e:
-            logger.exception('Tissue comparison failed: %s', e)
-
-        return results
