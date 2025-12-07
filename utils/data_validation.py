@@ -24,7 +24,8 @@ class DataValidator:
             'Gene Expression': self._validate_gene_expression,
             'VCF': self._validate_vcf,
             'GTF': self._validate_gtf,
-            'GFF': self._validate_gff
+            'GFF': self._validate_gff,
+            'BAM': self._validate_bam
         }
 
 
@@ -343,6 +344,307 @@ class DataValidator:
     def _validate_gff(self, df: pd.DataFrame) -> Dict[str, any]:
         """Validate GFF format file"""
         return self._validate_gtf(df)  # GFF and GTF have similar structures
+    
+    def _validate_bam(self, uploaded_file) -> Dict[str, any]:
+        """
+        Validate BAM file format and alignment quality.
+        
+        This method performs validation of BAM files including:
+        - Magic number verification
+        - Header structure validation
+        - Alignment flag validation
+        - Quality score checking
+        
+        Args:
+            uploaded_file: File object (BAM format, binary)
+        
+        Returns:
+            Dictionary with errors, warnings, and metrics
+        """
+        result = {'errors': [], 'warnings': [], 'metrics': {}}
+        
+        try:
+            # Try to use pysam for BAM validation if available
+            try:
+                import pysam
+                return self._validate_bam_with_pysam(uploaded_file)
+            except ImportError:
+                logger.info("pysam not available, using basic BAM validation")
+            
+            # Basic BAM validation without pysam
+            uploaded_file.seek(0)
+            
+            # Check BAM magic number (first 4 bytes should be "BAM\1")
+            magic = uploaded_file.read(4)
+            if magic != b'BAM\x01':
+                result['errors'].append("Invalid BAM file: incorrect magic number. Expected BAM format.")
+                return result
+            
+            # Read header length
+            header_len_bytes = uploaded_file.read(4)
+            if len(header_len_bytes) < 4:
+                result['errors'].append("Truncated BAM file: cannot read header length")
+                return result
+            
+            header_len = int.from_bytes(header_len_bytes, 'little')
+            result['metrics']['header_length'] = header_len
+            
+            # Read and validate header text
+            if header_len > 0:
+                header_text = uploaded_file.read(header_len)
+                if len(header_text) < header_len:
+                    result['errors'].append("Truncated BAM file: header incomplete")
+                    return result
+                
+                try:
+                    header_str = header_text.decode('utf-8', errors='ignore')
+                    # Check for required SAM header lines
+                    has_hd = '@HD' in header_str
+                    has_sq = '@SQ' in header_str
+                    
+                    if not has_hd:
+                        result['warnings'].append("BAM header missing @HD line (recommended)")
+                    if not has_sq:
+                        result['warnings'].append("BAM header missing @SQ reference sequences")
+                    
+                    # Count reference sequences
+                    sq_count = header_str.count('@SQ')
+                    result['metrics']['reference_sequences'] = sq_count
+                    
+                    # Extract additional header info
+                    if '@RG' in header_str:
+                        rg_count = header_str.count('@RG')
+                        result['metrics']['read_groups'] = rg_count
+                    
+                except Exception as e:
+                    result['warnings'].append(f"Could not fully parse BAM header: {e}")
+            
+            # Read number of reference sequences
+            n_ref_bytes = uploaded_file.read(4)
+            if len(n_ref_bytes) < 4:
+                result['errors'].append("Truncated BAM file: cannot read reference count")
+                return result
+            
+            n_ref = int.from_bytes(n_ref_bytes, 'little')
+            result['metrics']['n_references'] = n_ref
+            
+            # Skip reference sequence information
+            for _ in range(n_ref):
+                name_len_bytes = uploaded_file.read(4)
+                if len(name_len_bytes) < 4:
+                    break
+                name_len = int.from_bytes(name_len_bytes, 'little')
+                uploaded_file.read(name_len)  # reference name
+                uploaded_file.read(4)  # reference length
+            
+            # Sample alignments for quality validation
+            alignments_checked = 0
+            invalid_flags = 0
+            missing_quality = 0
+            unmapped_reads = 0
+            max_alignments_to_check = 1000
+            
+            while alignments_checked < max_alignments_to_check:
+                # Read alignment block size
+                block_size_bytes = uploaded_file.read(4)
+                if len(block_size_bytes) < 4:
+                    break  # End of file
+                
+                block_size = int.from_bytes(block_size_bytes, 'little')
+                if block_size <= 0:
+                    break
+                
+                # Read alignment data
+                alignment_data = uploaded_file.read(block_size)
+                if len(alignment_data) < block_size:
+                    break
+                
+                # Parse key alignment fields
+                if len(alignment_data) >= 32:
+                    # ref_id at bytes 0-3
+                    ref_id = int.from_bytes(alignment_data[0:4], 'little', signed=True)
+                    # pos at bytes 4-7
+                    # mapq at byte 8 (after pos)
+                    # bin_mq_nl at bytes 8-11
+                    # flag_nc at bytes 12-15
+                    flag_nc = int.from_bytes(alignment_data[12:16], 'little')
+                    flag = flag_nc >> 16
+                    
+                    # Validate FLAG field
+                    # Check for invalid flag combinations
+                    is_paired = flag & 0x1
+                    is_proper_pair = flag & 0x2
+                    is_unmapped = flag & 0x4
+                    is_mate_unmapped = flag & 0x8
+                    is_reverse = flag & 0x10
+                    is_mate_reverse = flag & 0x20
+                    is_read1 = flag & 0x40
+                    is_read2 = flag & 0x80
+                    is_secondary = flag & 0x100
+                    is_qc_fail = flag & 0x200
+                    is_duplicate = flag & 0x400
+                    is_supplementary = flag & 0x800
+                    
+                    # Invalid: proper pair set but not paired
+                    if is_proper_pair and not is_paired:
+                        invalid_flags += 1
+                    
+                    # Invalid: both read1 and read2 set
+                    if is_read1 and is_read2:
+                        invalid_flags += 1
+                    
+                    # Invalid: mate flags set but not paired
+                    if (is_mate_unmapped or is_mate_reverse) and not is_paired:
+                        invalid_flags += 1
+                    
+                    if is_unmapped:
+                        unmapped_reads += 1
+                    
+                    # Check for missing quality scores (represented as 0xFF)
+                    # l_seq at bytes 16-19
+                    l_seq = int.from_bytes(alignment_data[16:20], 'little')
+                    # Quality starts after: read_name + cigar + seq
+                    # This is approximate - full parsing would require complete CIGAR decoding
+                    
+                alignments_checked += 1
+            
+            result['metrics']['alignments_sampled'] = alignments_checked
+            result['metrics']['invalid_flags'] = invalid_flags
+            result['metrics']['unmapped_reads'] = unmapped_reads
+            
+            if invalid_flags > 0:
+                error_rate = invalid_flags / alignments_checked if alignments_checked > 0 else 0
+                result['metrics']['flag_error_rate'] = error_rate
+                if error_rate > 0.01:  # More than 1% invalid flags
+                    result['warnings'].append(f"{invalid_flags} alignments with invalid FLAG combinations ({error_rate:.2%})")
+            
+            if alignments_checked == 0:
+                result['warnings'].append("No alignments found in BAM file")
+            else:
+                unmapped_rate = unmapped_reads / alignments_checked
+                result['metrics']['unmapped_rate'] = unmapped_rate
+                if unmapped_rate > 0.5:  # More than 50% unmapped
+                    result['warnings'].append(f"High unmapped read rate: {unmapped_rate:.2%}")
+            
+            uploaded_file.seek(0)  # Reset file pointer
+            
+        except Exception as e:
+            result['errors'].append(f"Error validating BAM file: {str(e)}")
+            logger.exception("BAM validation error: %s", e)
+        
+        return result
+    
+    def _validate_bam_with_pysam(self, uploaded_file) -> Dict[str, any]:
+        """
+        Validate BAM file using pysam library for comprehensive analysis.
+        
+        Args:
+            uploaded_file: File object (BAM format)
+        
+        Returns:
+            Dictionary with errors, warnings, and metrics
+        """
+        import pysam
+        import tempfile
+        import os
+        
+        result = {'errors': [], 'warnings': [], 'metrics': {}}
+        
+        tmp_path = None
+        try:
+            # Write to temporary file for pysam to read
+            with tempfile.NamedTemporaryFile(delete=False, suffix='.bam') as tmp:
+                uploaded_file.seek(0)
+                tmp.write(uploaded_file.read())
+                tmp_path = tmp.name
+            
+            # Open BAM file
+            bam = pysam.AlignmentFile(tmp_path, 'rb')
+            
+            # Header validation
+            header = bam.header
+            result['metrics']['reference_sequences'] = bam.nreferences
+            result['metrics']['references'] = list(bam.references)[:10]  # First 10 refs
+            
+            if 'HD' not in header:
+                result['warnings'].append("BAM header missing @HD line")
+            
+            if 'RG' in header:
+                result['metrics']['read_groups'] = len(header['RG'])
+            
+            # Sample alignments for validation
+            alignments_checked = 0
+            invalid_flags = 0
+            missing_quality = 0
+            unmapped_reads = 0
+            duplicate_reads = 0
+            qc_failed = 0
+            total_mapq = 0
+            max_alignments = 10000
+            
+            for read in bam.fetch(until_eof=True):
+                alignments_checked += 1
+                
+                # Check flag validity
+                if read.is_proper_pair and not read.is_paired:
+                    invalid_flags += 1
+                if read.is_read1 and read.is_read2:
+                    invalid_flags += 1
+                
+                if read.is_unmapped:
+                    unmapped_reads += 1
+                if read.is_duplicate:
+                    duplicate_reads += 1
+                if read.is_qcfail:
+                    qc_failed += 1
+                
+                # Check quality scores
+                if read.query_qualities is None or len(read.query_qualities) == 0:
+                    missing_quality += 1
+                elif all(q == 255 for q in read.query_qualities):
+                    missing_quality += 1
+                
+                if not read.is_unmapped:
+                    total_mapq += read.mapping_quality
+                
+                if alignments_checked >= max_alignments:
+                    break
+            
+            bam.close()
+            
+            # Calculate metrics
+            result['metrics']['alignments_sampled'] = alignments_checked
+            result['metrics']['invalid_flags'] = invalid_flags
+            result['metrics']['missing_quality_scores'] = missing_quality
+            result['metrics']['unmapped_reads'] = unmapped_reads
+            result['metrics']['duplicate_reads'] = duplicate_reads
+            result['metrics']['qc_failed_reads'] = qc_failed
+            
+            if alignments_checked > 0:
+                mapped_reads = alignments_checked - unmapped_reads
+                result['metrics']['unmapped_rate'] = unmapped_reads / alignments_checked
+                result['metrics']['duplicate_rate'] = duplicate_reads / alignments_checked
+                result['metrics']['mean_mapq'] = total_mapq / mapped_reads if mapped_reads > 0 else 0
+                
+                if invalid_flags / alignments_checked > 0.01:
+                    result['warnings'].append(f"{invalid_flags} alignments with invalid FLAGS")
+                if missing_quality / alignments_checked > 0.1:
+                    result['warnings'].append(f"{missing_quality} reads missing quality scores")
+                if unmapped_reads / alignments_checked > 0.5:
+                    result['warnings'].append(f"High unmapped rate: {unmapped_reads/alignments_checked:.1%}")
+            else:
+                result['warnings'].append("No alignments found in BAM file")
+            
+            uploaded_file.seek(0)
+            
+        except Exception as e:
+            result['errors'].append(f"Error validating BAM with pysam: {str(e)}")
+            logger.exception("pysam BAM validation error: %s", e)
+        finally:
+            if tmp_path and os.path.exists(tmp_path):
+                os.remove(tmp_path)
+        
+        return result
     
     def calculate_file_checksum(self, uploaded_file) -> str:
         """Calculate MD5 checksum of file"""

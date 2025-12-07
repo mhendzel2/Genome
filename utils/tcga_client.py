@@ -371,46 +371,180 @@ class TCGAClient:
     
     def get_mutation_data(self, gene_symbol: str, 
                          project_id: Optional[str] = None,
-                         size: int = 100) -> List[Dict[str, Any]]:
+                         size: int = 100,
+                         page_size: int = 100) -> List[Dict[str, Any]]:
         """
-        Get mutation data for a specific gene.
+        Get mutation data for a specific gene from the GDC mutations endpoint.
         
         Args:
             gene_symbol: Gene symbol (e.g., 'TP53')
             project_id: Optional TCGA project to filter by
-            size: Maximum number of results
+            size: Maximum total number of results to return
+            page_size: Number of results per API request for pagination
         
         Returns:
-            List of mutation dictionaries
+            List of mutation dictionaries with fields:
+            - ssm_id: Unique mutation identifier
+            - sample_id: Sample/case submitter ID
+            - case_id: GDC case UUID
+            - project_id: TCGA project ID
+            - chromosome: Chromosome location
+            - start_position: Start position
+            - end_position: End position
+            - reference_allele: Reference allele
+            - tumor_allele: Tumor/alternate allele
+            - variant_classification: Type of variant (Missense, Nonsense, etc.)
+            - variant_type: SNP, DEL, INS, etc.
+            - consequence_type: VEP consequence annotation
+            - impact: Mutation impact (HIGH, MODERATE, LOW, MODIFIER)
+            - gene_symbol: Gene symbol
+            - transcript_id: Affected transcript
+            - aa_change: Amino acid change (if applicable)
+            - allele_frequency: Tumor allele frequency (if available)
         """
+        ssm_endpoint = f"{self.api_base}/ssms"
+        mutations = []
+        offset = 0
+        
         try:
-            # Note: This uses the mutations endpoint which requires more complex filtering
-            # This is a simplified implementation
-            
-            filters = {'op': 'and', 'content': [
-                {
-                    'op': '=',
-                    'content': {
-                        'field': 'ssm.consequence.transcript.gene.symbol',
-                        'value': gene_symbol
+            while len(mutations) < size:
+                # Build filters for gene symbol
+                filters = {'op': 'and', 'content': [
+                    {
+                        'op': '=',
+                        'content': {
+                            'field': 'consequence.transcript.gene.symbol',
+                            'value': gene_symbol
+                        }
                     }
+                ]}
+                
+                if project_id:
+                    filters['content'].append({
+                        'op': '=',
+                        'content': {
+                            'field': 'occurrence.case.project.project_id',
+                            'value': project_id
+                        }
+                    })
+                
+                # Request fields for comprehensive mutation data
+                fields = [
+                    'ssm_id',
+                    'chromosome',
+                    'start_position',
+                    'end_position',
+                    'reference_allele',
+                    'tumor_allele',
+                    'ncbi_build',
+                    'variant_type',
+                    'consequence.transcript.gene.symbol',
+                    'consequence.transcript.gene.gene_id',
+                    'consequence.transcript.transcript_id',
+                    'consequence.transcript.aa_change',
+                    'consequence.transcript.consequence_type',
+                    'consequence.transcript.annotation.vep_impact',
+                    'occurrence.case.case_id',
+                    'occurrence.case.submitter_id',
+                    'occurrence.case.project.project_id'
+                ]
+                
+                current_page_size = min(page_size, size - len(mutations))
+                
+                params = {
+                    'filters': json.dumps(filters),
+                    'fields': ','.join(fields),
+                    'expand': 'consequence.transcript,occurrence.case.project',
+                    'size': current_page_size,
+                    'from': offset,
+                    'format': 'JSON'
                 }
-            ]}
+                
+                logger.info(f"Querying GDC mutations for {gene_symbol}, offset={offset}")
+                response = requests.get(ssm_endpoint, params=params, timeout=60)
+                response.raise_for_status()
+                data = response.json()
+                
+                hits = data.get('data', {}).get('hits', [])
+                
+                if not hits:
+                    break  # No more results
+                
+                for hit in hits:
+                    # Extract consequence information
+                    consequences = hit.get('consequence', [])
+                    primary_consequence = {}
+                    for cons in consequences:
+                        transcript = cons.get('transcript', {})
+                        gene = transcript.get('gene', {})
+                        if gene.get('symbol') == gene_symbol:
+                            primary_consequence = cons
+                            break
+                    
+                    if not primary_consequence and consequences:
+                        primary_consequence = consequences[0]
+                    
+                    transcript_info = primary_consequence.get('transcript', {})
+                    annotation = transcript_info.get('annotation', {})
+                    
+                    # Extract occurrence/case information
+                    occurrences = hit.get('occurrence', [])
+                    
+                    # If filtering by project, use relevant occurrences
+                    for occ in occurrences:
+                        case_info = occ.get('case', {})
+                        case_project = case_info.get('project', {})
+                        
+                        # Skip if project filter is set and doesn't match
+                        if project_id and case_project.get('project_id') != project_id:
+                            continue
+                        
+                        mutation_record = {
+                            'ssm_id': hit.get('ssm_id', ''),
+                            'sample_id': case_info.get('submitter_id', ''),
+                            'case_id': case_info.get('case_id', ''),
+                            'project_id': case_project.get('project_id', ''),
+                            'chromosome': hit.get('chromosome', ''),
+                            'start_position': hit.get('start_position'),
+                            'end_position': hit.get('end_position'),
+                            'reference_allele': hit.get('reference_allele', ''),
+                            'tumor_allele': hit.get('tumor_allele', ''),
+                            'ncbi_build': hit.get('ncbi_build', 'GRCh38'),
+                            'variant_type': hit.get('variant_type', ''),
+                            'variant_classification': transcript_info.get('consequence_type', ''),
+                            'consequence_type': transcript_info.get('consequence_type', ''),
+                            'impact': annotation.get('vep_impact', ''),
+                            'gene_symbol': gene_symbol,
+                            'gene_id': transcript_info.get('gene', {}).get('gene_id', ''),
+                            'transcript_id': transcript_info.get('transcript_id', ''),
+                            'aa_change': transcript_info.get('aa_change', ''),
+                            'database': 'TCGA/GDC'
+                        }
+                        
+                        mutations.append(mutation_record)
+                        
+                        if len(mutations) >= size:
+                            break
+                    
+                    if len(mutations) >= size:
+                        break
+                
+                # Check pagination
+                pagination = data.get('data', {}).get('pagination', {})
+                total = pagination.get('total', 0)
+                
+                offset += current_page_size
+                
+                # Stop if we've retrieved all available results
+                if offset >= total:
+                    break
             
-            if project_id:
-                filters['content'].append({
-                    'op': '=',
-                    'content': {
-                        'field': 'cases.project.project_id',
-                        'value': project_id
-                    }
-                })
+            logger.info(f"Retrieved {len(mutations)} mutations for {gene_symbol}")
+            return mutations
             
-            # This is a placeholder - full implementation would use the proper mutations endpoint
-            logger.info(f"Mutation query for {gene_symbol} in project {project_id}")
-            
+        except requests.exceptions.RequestException as e:
+            logger.exception("Error querying GDC mutations endpoint: %s", e)
             return []
-            
         except Exception as e:
-            logger.exception("Error getting mutation data: %s", e)
+            logger.exception("Unexpected error in get_mutation_data: %s", e)
             return []
