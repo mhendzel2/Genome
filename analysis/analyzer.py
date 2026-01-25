@@ -1,11 +1,17 @@
 import pandas as pd
 from utils.data_validation import DataValidator
 import gseapy
-import cooler
-import cooltools
 import tempfile
 import os
 from scipy.stats import pearsonr
+
+# Try to import cooler/cooltools for Hi-C analysis (optional on Windows)
+try:
+    import cooler
+    import cooltools
+except ImportError:
+    cooler = None
+    cooltools = None
 
 class GenomicsAnalyzer:
     """A class for performing genomics analysis."""
@@ -51,6 +57,8 @@ class GenomicsAnalyzer:
 
     def chromatin_interaction_analysis(self, uploaded_file, **params) -> dict:
         """Analyze chromatin interaction data (Hi-C) using cooltools."""
+        if cooler is None or cooltools is None:
+            return {'error': 'Hi-C analysis requires cooler and cooltools packages (not available on Windows)'}
         try:
             # cooltools works with .cool files. We'll need to save the uploaded file
             # to a temporary path to be read by cooler.
