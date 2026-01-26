@@ -50,7 +50,7 @@ class DatasetDiscovery:
                        search_term: str = "",
                        data_types: Optional[List[str]] = None,
                        tissues: Optional[List[str]] = None,
-                       organism: str = "Human",
+                       organism: str = "Homo sapiens",
                        use_semantic_search: bool = True) -> List[Dict[str, Any]]:
         """Search for datasets on the ENCODE platform."""
 
@@ -68,8 +68,8 @@ class DatasetDiscovery:
             search_params = {
                 "type": "Experiment",
                 "status": "released",
-                "limit": "20", # Limit per term to avoid overload
-                "frame": "object"
+                "limit": "25", # Limit per term to avoid overload
+                "format": "json"
             }
 
             if term:
@@ -169,37 +169,90 @@ class DatasetDiscovery:
 
         return links
 
-    def download_dataset(self, dataset_id: str) -> str:
-        """Download all files for a given dataset from ENCODE."""
+    def download_dataset(self, dataset_id: str, file_types: Optional[List[str]] = None,
+                        max_files: int = 10) -> str:
+        """Download files for a given dataset from ENCODE.
+        
+        Args:
+            dataset_id: ENCODE experiment accession (e.g., ENCSR675FLJ)
+            file_types: Optional list of file types to download (e.g., ['bigWig', 'bed'])
+                       If None, downloads processed files (bigWig, bed, bigBed)
+            max_files: Maximum number of files to download (default 10)
+        
+        Returns:
+            Path to download directory
+        """
         dataset_details = self.get_dataset_details(dataset_id)
         if not dataset_details:
             raise Exception("Could not retrieve dataset details.")
 
-        download_dir = os.path.join("downloads", dataset_id)
+        download_dir = os.path.join("downloads", "encode", dataset_id)
         os.makedirs(download_dir, exist_ok=True)
         import logging
         logger = logging.getLogger(__name__)
 
-        def _sanitize_name(s: str) -> str:
-            return ''.join(c if c.isalnum() or c in ('_', '-', '.') else '_' for c in (s or ''))[:200]
-
+        # Default to processed file types if not specified
+        if file_types is None:
+            file_types = ['bigWig', 'bed', 'bigBed', 'bam']
+        
+        files_to_download = []
         for file_info in dataset_details.get('files', []):
-            file_url = self.base_url + file_info.get('href')
+            file_type = file_info.get('file_type', '')
+            file_format = file_info.get('file_format', '')
+            output_type = file_info.get('output_type', '')
+            status = file_info.get('status', '')
+            
+            # Skip archived or revoked files
+            if status not in ['released', 'in progress']:
+                continue
+            
+            # Filter by file type
+            if file_type in file_types or file_format in file_types:
+                files_to_download.append(file_info)
+        
+        # Limit number of files
+        files_to_download = files_to_download[:max_files]
+        
+        if not files_to_download:
+            logger.warning(f"No files matching types {file_types} found for {dataset_id}")
+            # Fallback: get first few files of any type
+            files_to_download = dataset_details.get('files', [])[:3]
+
+        logger.info(f"Downloading {len(files_to_download)} files for {dataset_id}")
+        
+        downloaded_count = 0
+        for file_info in files_to_download:
+            href = file_info.get('href', '')
+            if not href:
+                continue
+                
+            file_url = self.base_url + href
             accession = file_info.get('accession', 'file')
-            title = file_info.get('title', '')
-            safe_name = f"{_sanitize_name(accession)}_{_sanitize_name(title)}"
-            local_filename = os.path.join(download_dir, safe_name)
+            
+            # Extract filename from href (e.g., /files/ENCFF871EJI/@@download/ENCFF871EJI.fastq.gz)
+            filename = href.split('/')[-1] if '/' in href else f"{accession}.dat"
+            local_filepath = os.path.join(download_dir, filename)
 
             try:
-                with requests.get(file_url, stream=True) as r:
+                logger.info(f"Downloading {filename} from {file_url}")
+                with requests.get(file_url, stream=True, timeout=600) as r:
                     r.raise_for_status()
-                    with open(local_filename, 'wb') as f:
+                    total_size = int(r.headers.get('content-length', 0))
+                    
+                    with open(local_filepath, 'wb') as f:
+                        downloaded = 0
                         for chunk in r.iter_content(chunk_size=8192):
                             f.write(chunk)
+                            downloaded += len(chunk)
+                    
+                    logger.info(f"Downloaded {filename} ({downloaded / 1e6:.1f} MB)")
+                    downloaded_count += 1
+                    
             except requests.exceptions.RequestException as e:
                 logger.exception("Error downloading %s: %s", file_url, e)
                 continue
 
+        logger.info(f"Successfully downloaded {downloaded_count} files to {download_dir}")
         return download_dir
 
     def _generate_mock_datasets(self) -> list:

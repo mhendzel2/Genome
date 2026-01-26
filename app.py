@@ -1,6 +1,7 @@
 import streamlit as st
 from utils.dataset_discovery import DatasetDiscovery
 from utils.depmap_client import DepMapClient
+from utils.geo_client import GEOClient
 from utils.visualization import GenomicsVisualizer
 from analysis.analyzer_adapter import AnalyzerAdapter
 from utils.r_integration import RIntegration
@@ -15,18 +16,28 @@ logging.basicConfig(level=logging.INFO,
                     filename='app.log',
                     filemode='a')
 
-def dataset_discovery_page(dataset_discovery, depmap_client):
+def dataset_discovery_page(dataset_discovery, depmap_client, geo_client):
     st.header("🔍 Dataset Discovery")
 
-    source = st.selectbox("Select Data Source", ["ENCODE", "DepMap"])
+    source = st.selectbox("Select Data Source", ["ENCODE", "GEO", "DepMap"])
 
     if source == "ENCODE":
         try:
-            search_term = st.text_input("Search ENCODE", placeholder="e.g., H3K4me3, GSE12345")
+            search_term = st.text_input("Search ENCODE", placeholder="e.g., H4K5ac, ENCSR675FLJ, ChIP-seq")
+            
+            col1, col2 = st.columns(2)
+            with col1:
+                organism = st.selectbox("Organism", ["Homo sapiens", "Mus musculus", ""], index=0)
+            with col2:
+                use_semantic = st.checkbox("Use semantic expansion", value=False)
 
-            if st.button("Search"):
-                with st.spinner("Searching..."):
-                    results = dataset_discovery.search_datasets(search_term=search_term)
+            if st.button("Search ENCODE"):
+                with st.spinner("Searching ENCODE..."):
+                    results = dataset_discovery.search_datasets(
+                        search_term=search_term,
+                        organism=organism if organism else None,
+                        use_semantic_search=use_semantic
+                    )
                     if results:
                         st.success(f"Found {len(results)} datasets.")
                         st.session_state['search_results'] = results
@@ -49,6 +60,70 @@ def dataset_discovery_page(dataset_discovery, depmap_client):
         except Exception as e:
             st.error("An error occurred on the Dataset Discovery page.")
             logging.error(f"Error on Dataset Discovery page: {e}", exc_info=True)
+
+    elif source == "GEO":
+        try:
+            search_term = st.text_input("Search GEO", placeholder="e.g., GSE135771, KANSL1, MSL1 ChIP-seq")
+            
+            col1, col2 = st.columns(2)
+            with col1:
+                max_results = st.slider("Max results", 5, 50, 20)
+            with col2:
+                dataset_type = st.selectbox("Dataset type", ["gse", "gds", "gpl"], index=0)
+
+            if st.button("Search GEO"):
+                with st.spinner("Searching GEO..."):
+                    results = geo_client.search_datasets(
+                        search_term=search_term,
+                        dataset_type=dataset_type,
+                        max_results=max_results
+                    )
+                    if results:
+                        st.success(f"Found {len(results)} datasets.")
+                        st.session_state['search_results'] = results
+                        st.session_state['geo_results'] = results
+                        for result in results:
+                            with st.expander(f"{result['accession']}: {result['title']}"):
+                                st.write(f"**Description:** {result.get('description', 'N/A')[:500]}")
+                                st.write(f"**Organism:** {result.get('organism', 'N/A')}")
+                                st.write(f"**Samples:** {result.get('n_samples', 'N/A')}")
+                                st.write(f"**Platform:** {result.get('platform', 'N/A')}")
+                                st.write(f"**Submission Date:** {result.get('submission_date', 'N/A')}")
+                                if result.get('pubmed_id'):
+                                    st.write(f"**PubMed ID:** {result['pubmed_id']}")
+                                
+                                # Download buttons
+                                dl_col1, dl_col2 = st.columns(2)
+                                with dl_col1:
+                                    if st.button("Download Matrix", key=f"matrix_{result['accession']}"):
+                                        with st.spinner(f"Downloading series matrix for {result['accession']}..."):
+                                            try:
+                                                files = geo_client.download_series_matrix(result['accession'])
+                                                st.success(f"Downloaded {len(files)} file(s) to downloads/geo/")
+                                                for f in files:
+                                                    st.write(f"  - `{f}`")
+                                            except Exception as e:
+                                                st.error(f"Download failed: {e}")
+                                                logging.error(f"GEO matrix download failed: {e}", exc_info=True)
+                                with dl_col2:
+                                    if st.button("Download Supplementary", key=f"suppl_{result['accession']}"):
+                                        with st.spinner(f"Downloading supplementary files for {result['accession']}..."):
+                                            try:
+                                                files = geo_client.download_supplementary_files(result['accession'])
+                                                if files:
+                                                    st.success(f"Downloaded {len(files)} file(s) to downloads/geo/")
+                                                    for f in files:
+                                                        st.write(f"  - `{f}`")
+                                                else:
+                                                    st.warning("No supplementary files found.")
+                                            except Exception as e:
+                                                st.error(f"Download failed: {e}")
+                                                logging.error(f"GEO supplementary download failed: {e}", exc_info=True)
+                    else:
+                        st.warning("No datasets found.")
+        except Exception as e:
+            st.error("An error occurred while searching GEO.")
+            logging.error(f"Error on GEO search: {e}", exc_info=True)
 
     elif source == "DepMap":
         try:
@@ -227,6 +302,7 @@ def main():
     
     dataset_discovery = DatasetDiscovery()
     depmap_client = DepMapClient()
+    geo_client = GEOClient()
     visualizer = GenomicsVisualizer()
     r_integration = RIntegration()
     analyzer = AnalyzerAdapter(r_integration)
@@ -239,7 +315,7 @@ def main():
     if page == "Home":
         st.write("Welcome to the new and improved Genomics Data Analysis Platform!")
     elif page == "Dataset Discovery":
-        dataset_discovery_page(dataset_discovery, depmap_client)
+        dataset_discovery_page(dataset_discovery, depmap_client, geo_client)
     elif page == "Analysis":
         analysis_page(analyzer)
     elif page == "Visualization":

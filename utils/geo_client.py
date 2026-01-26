@@ -158,56 +158,90 @@ class GEOClient:
             logger.exception("Unexpected error in get_dataset_details: %s", e)
             return None
     
-    def download_series_matrix(self, accession: str, 
-                              download_dir: str = "downloads/geo") -> str:
+    def _get_series_stub(self, accession: str) -> str:
+        """Get correct GEO FTP path bucket for a series accession.
+        
+        Examples:
+            GSE135771 -> GSE135nnn
+            GSE12345 -> GSE12nnn
+            GSE1234 -> GSE1nnn
         """
-        Download series matrix file for a GEO Series.
+        num_str = accession.replace("GSE", "")
+        if len(num_str) <= 3:
+            return "GSEnnn"
+        else:
+            prefix = num_str[:-3]
+            return f"GSE{prefix}nnn"
+    
+    def download_series_matrix(self, accession: str, 
+                              download_dir: str = "downloads/geo") -> List[str]:
+        """
+        Download series matrix file(s) for a GEO Series.
         
         Args:
             accession: GEO Series accession (e.g., GSE12345)
             download_dir: Directory to save the file
         
         Returns:
-            Path to downloaded file
+            List of paths to downloaded files
         """
         os.makedirs(download_dir, exist_ok=True)
+        downloaded_files = []
         
         try:
-            # Construct FTP URL for series matrix file
-            # Format: ftp://ftp.ncbi.nlm.nih.gov/geo/series/GSEnnn/GSE12345/matrix/
-            series_stub = accession[:-3] + 'nnn'  # GSE12345 -> GSE12nnn
-            matrix_url = f"{self.ftp_base}/series/{series_stub}/{accession}/matrix/"
+            # Construct FTP URL for series matrix directory
+            series_stub = self._get_series_stub(accession)
+            matrix_dir_url = f"{self.ftp_base}/series/{series_stub}/{accession}/matrix/"
             
-            # Try to get the series matrix file
-            matrix_filename = f"{accession}_series_matrix.txt.gz"
-            file_url = matrix_url + matrix_filename
+            logger.info(f"Listing matrix directory: {matrix_dir_url}")
             
-            logger.info(f"Downloading from: {file_url}")
+            # Get directory listing to find actual file names
+            dir_response = requests.get(matrix_dir_url, timeout=30)
+            dir_response.raise_for_status()
             
-            response = requests.get(file_url, stream=True, timeout=300)
-            response.raise_for_status()
+            # Parse HTML to find matrix files
+            import re
+            file_pattern = re.compile(rf'href="({accession}[^"]*_series_matrix\.txt\.gz)"')
+            matrix_files = file_pattern.findall(dir_response.text)
             
-            local_path = os.path.join(download_dir, matrix_filename)
+            if not matrix_files:
+                # Fallback: try the simple name format
+                matrix_files = [f"{accession}_series_matrix.txt.gz"]
             
-            with open(local_path, 'wb') as f:
-                for chunk in response.iter_content(chunk_size=8192):
-                    f.write(chunk)
+            logger.info(f"Found matrix files: {matrix_files}")
             
-            logger.info(f"Successfully downloaded to: {local_path}")
-            return local_path
+            for filename in matrix_files:
+                file_url = matrix_dir_url + filename
+                logger.info(f"Downloading: {file_url}")
+                
+                response = requests.get(file_url, stream=True, timeout=300)
+                response.raise_for_status()
+                
+                local_path = os.path.join(download_dir, filename)
+                
+                with open(local_path, 'wb') as f:
+                    for chunk in response.iter_content(chunk_size=8192):
+                        f.write(chunk)
+                
+                logger.info(f"Successfully downloaded to: {local_path}")
+                downloaded_files.append(local_path)
+            
+            return downloaded_files
             
         except requests.exceptions.RequestException as e:
             logger.exception("Error downloading series matrix: %s", e)
             raise Exception(f"Failed to download {accession}: {e}")
     
     def download_supplementary_files(self, accession: str,
-                                    download_dir: str = "downloads/geo") -> List[str]:
+                                    download_dir: str = "downloads/geo",
+                                    max_files: int = 10) -> List[str]:
         """
         Download supplementary files for a GEO dataset.
         
         Args:
             accession: GEO accession
             download_dir: Directory to save files
+            max_files: Maximum number of files to download
         
         Returns:
             List of paths to downloaded files
@@ -217,26 +251,34 @@ class GEOClient:
         
         try:
             # Construct supplementary files URL
-            series_stub = accession[:-3] + 'nnn'
+            series_stub = self._get_series_stub(accession)
             suppl_url = f"{self.ftp_base}/series/{series_stub}/{accession}/suppl/"
             
             logger.info(f"Accessing supplementary files at: {suppl_url}")
             
-            # Get directory listing (this is simplified - full implementation would parse HTML)
+            # Get directory listing
             response = requests.get(suppl_url, timeout=30)
             response.raise_for_status()
             
-            # This is a simplified approach - in practice, you'd parse the directory listing
-            # For now, we'll try common supplementary file patterns
-            common_patterns = [
-                f"{accession}_RAW.tar",
-                f"filelist.txt"
-            ]
+            # Parse HTML to find downloadable files
+            import re
+            # Match href links that look like data files
+            file_pattern = re.compile(r'href="([^"]+\.(txt|csv|gz|tar|bed|wig|bw|bam|fastq|CEL|RAW)[^"]*)"', re.IGNORECASE)
+            files_found = file_pattern.findall(response.text)
             
-            for filename in common_patterns:
+            # Extract just the filenames (first group)
+            filenames = [f[0] for f in files_found if not f[0].startswith('/')]
+            
+            logger.info(f"Found {len(filenames)} supplementary files")
+            
+            # Limit downloads
+            filenames = filenames[:max_files]
+            
+            for filename in filenames:
                 try:
                     file_url = suppl_url + filename
-                    file_response = requests.get(file_url, stream=True, timeout=300)
+                    logger.info(f"Downloading: {filename}")
+                    file_response = requests.get(file_url, stream=True, timeout=600)
                     file_response.raise_for_status()
                     
                     local_path = os.path.join(download_dir, filename)
